@@ -1,0 +1,116 @@
+app:
+  source: "./input"
+  destination: "./output"
+  extensions:
+    - ".docx"
+    - ".pdf"
+    - ".pptx"
+  recursive: true
+  preserve_source_tree: true
+  copy_source: true
+  overwrite: false
+
+extract:
+  engine: "xberg"
+  use_cache: true
+  enable_quality_processing: true
+  output_format: "markdown"
+  extraction_timeout_secs: 600
+
+  images:
+    extract_images: true
+    target_dpi: 300
+    max_image_dimension: 4096
+    auto_adjust_dpi: true
+    inject_placeholders: true
+    include_data_base64: true
+    run_ocr_on_images: false
+
+  deduplicate_assets: true
+
+  # Word headers/footers are page-oriented. For publication, keep header artwork once.
+  docx_layout:
+    include_header_images_once: true
+    include_footer_images_once: false
+
+  # PDF can repeat a logo/watermark on every page.
+  pdf_layout:
+    collapse_repeated_images: true
+    repeat_threshold: 3
+
+  pdf_options:
+    extract_images: true
+    extract_tables: true
+    extract_metadata: true
+
+  diagnostics:
+    inspect_ooxml: true
+    warn_on_unresolved_images: true
+    keep_raw_xberg_markdown: true
+
+profiles:
+  publication:
+    enabled: true
+    # DOCX/PPTX/PDF source geometry is stored in manifest.json.
+    # When possible, a raster derivative is generated at the source display size.
+    preserve_image_display_size: true
+    display_image_directory: "publication_images"
+    min_display_px: 12
+    max_display_px: 1800
+    avoid_upscale: false
+    preserve_formatting: true
+
+  rag:
+    enabled: true
+    write_descriptor: true
+    # RAG Markdown intentionally does NOT contain x/y/width/height metadata.
+    keep_image_references: true
+    include_header_images: false
+    include_footer_images: false
+    collapse_repeated_images: true
+    token_reduction: "off"
+    chunking:
+      enabled: true
+      max_characters: 1600
+      overlap: 150
+      prepend_heading_context: true
+
+confluence:
+  # Cloud only in DocSpecBridge 0.2.0b1. All instances use REST API v2.
+  default_instance: "production"
+
+  instances:
+    production:
+      domain: "company.atlassian.net"
+      base_path: "/wiki/"
+      # Optional: for an Atlassian scoped API token, set the ex/confluence/CLOUD_ID URL.
+      api_url: ""
+      # Classic API token/basic auth: put the Atlassian account email here.
+      # Leave blank for Bearer/scoped token auth.
+      user_name: ""
+      # Secret value is NEVER stored in YAML.
+      token_env: "ATLASSIAN_API_TOKEN"
+      default_space: ""
+      root_page: ""
+
+    # Example second Cloud instance:
+    # sandbox:
+    #   domain: "company-sandbox.atlassian.net"
+    #   base_path: "/wiki/"
+    #   api_url: ""
+    #   user_name: "user@example.com"
+    #   token_env: "ATLASSIAN_SANDBOX_API_TOKEN"
+    #   default_space: "TEST"
+    #   root_page: ""
+
+  keep_hierarchy: false
+  overwrite_manual_changes: false
+  write_page_id_to_markdown: false
+
+  layout:
+    image_alignment: "center"
+    image_max_width: 1600
+    table_display_mode: "responsive"
+
+  # Reserved for later Mermaid strategy. md2conf can already render Mermaid.
+  render_mermaid: false

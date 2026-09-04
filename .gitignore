@@ -1,0 +1,47 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python caches / tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Local DocSpecBridge configuration / secrets
+docspecbridge.yaml
+docspecbridge.yml
+.env
+.env.*
+!.env.example
+
+# Local source documents and generated corpus
+# Keep only the harmless placeholder README in input/ if present.
+input/*
+!input/README.txt
+output/
+
+# Logs / temporary files
+*.log
+*.tmp
+*.bak
+~$*
+
+# IDE / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
