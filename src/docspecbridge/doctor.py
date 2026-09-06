@@ -4,10 +4,12 @@ import os
 import platform
 import sys
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 from . import __version__
 from .config import confluence_instances
+from .i18n import config_language
 
 
 def package_version(name: str) -> str:
@@ -17,9 +19,18 @@ def package_version(name: str) -> str:
         return "NOT INSTALLED"
 
 
-def doctor_info(config: dict[str, Any]) -> dict[str, str]:
+def doctor_info(config: dict[str, Any], *, config_path: Path | None = None) -> dict[str, str]:
+    app = config.get("app") or {}
+    source = Path(str(app.get("source") or "./input"))
+    destination = Path(str(app.get("destination") or "./output"))
+    rag_destination = Path(str((config.get("rag_export") or {}).get("destination") or "./rag"))
     info = {
         "DocSpecBridge": __version__,
+        "Language": config_language(config),
+        "Config": str(config_path) if config_path else "auto/default",
+        "Source": f"{source} / {'EXISTS' if source.exists() else 'MISSING'}",
+        "Destination": f"{destination} / {'EXISTS' if destination.exists() else 'MISSING'}",
+        "RAG corpus": f"{rag_destination} / {'EXISTS' if rag_destination.exists() else 'MISSING'}",
         "Python": sys.version.split()[0],
         "Platform": platform.platform(),
         "xberg": package_version("xberg"),
@@ -35,12 +46,15 @@ def doctor_info(config: dict[str, Any]) -> dict[str, str]:
 
     instances = confluence_instances(config)
     if not instances:
-        info["Confluence"] = "aucune instance configurée"
+        info["Confluence"] = "no instance configured"
     else:
         for name, instance in instances.items():
             env_name = str(instance.get("token_env") or "ATLASSIAN_API_TOKEN")
-            target = instance.get("domain") or instance.get("api_url") or "?"
             token_status = "SET" if os.getenv(env_name) else "NOT SET"
-            info[f"Confluence[{name}]"] = f"{target} / {env_name}={token_status}"
+            auth_type = str(instance.get("auth_type") or "classic")
+            target = instance.get("domain") or "?"
+            if auth_type == "scoped":
+                target = f"api.atlassian.com/ex/confluence/{instance.get('cloud_id') or '?'}"
+            info[f"Confluence[{name}]"] = f"{auth_type} / {target} / {env_name}={token_status}"
 
     return info

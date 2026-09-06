@@ -32,6 +32,7 @@ docspecbridge.yml
 input/*
 !input/README.txt
 output/
+rag/
 
 # Logs / temporary files
 *.log

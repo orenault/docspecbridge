@@ -1,224 +1,248 @@
-# DocSpecBridge 0.2.0b1 (Beta)
+# DocSpecBridge 0.2.1
 
-DocSpecBridge is a Python document ETL bridge:
+Document ETL bridge for **DOCX / PDF / PPTX → publication Markdown + RAG corpus → Confluence Cloud**.
+
+DocSpecBridge keeps the source document and rich technical metadata, while deriving two different views:
+
+- a **publication** view for humans / Confluence;
+- a **RAG** view optimized for retrieval, without layout-only metadata in the indexed text.
+
+## Main commands
+
+```powershell
+docspecbridge                 # interactive menu
+docspecbridge config          # settings UI
+docspecbridge extract         # documents -> self-contained packages
+docspecbridge publish         # existing packages -> Confluence Cloud
+docspecbridge doc2wiki        # extract + publish, file or batch
+docspecbridge rag-export      # existing packages -> portable RAG corpus
+docspecbridge doc2rag         # extract + portable RAG corpus
+docspecbridge doctor
+```
+
+Without command-line overrides, `extract`, `publish`, `doc2wiki` and `doc2rag` use the YAML defaults. CLI options override YAML values for that run only.
+
+Example:
+
+```powershell
+docspecbridge doc2wiki `
+  --source C:\specs `
+  --dest C:\work\docspecbridge `
+  --instance production `
+  --space ARCHI `
+  --parent 123456789 `
+  --recursive `
+  -e docx -e pdf -e pptx
+```
+
+```powershell
+docspecbridge doc2rag `
+  --source C:\specs `
+  --rag-dest C:\rag-corpus
+```
+
+## Interactive menu
 
 ```text
-DOCX / PDF / PPTX
-        |
-        v
-      Xberg
-        |
-        +--> normalized source assets + source geometry
-        |
-        +--> publication Markdown --> md2conf --> Confluence Cloud
-        |
-        +--> RAG Markdown + chunks.jsonl
+Paramétrage
+Extract
+Import Confluence
+Doc2Wiki - Extract + Import Confluence
+Doc2RAG - Extract + Export RAG
+Aide
+Quitter
 ```
 
-The 0.2.0b1 release separates **publication fidelity** from **RAG efficiency**. Layout metadata is never injected into RAG text; it is stored in JSON and used to build publication-specific image variants.
+Arrow keys select an item, **Enter** validates and **Esc** returns/cancels where supported.
 
-## 1. Installation with uv
+## Package produced by `extract`
 
-Python 3.14.7 is recommended for the current POC.
-
-```powershell
-cd C:\DEV\docspecbridge
-uv venv --python 3.14.7
-.\.venv\Scripts\Activate.ps1
-uv sync
-uv run docspecbridge doctor
-```
-
-`uv.lock` should be committed once generated. `.venv/` must stay in `.gitignore`.
-
-## 2. First extraction
-
-Interactive:
-
-```powershell
-uv run docspecbridge
-```
-
-CLI:
-
-```powershell
-uv run docspecbridge extract `
-  --source "C:\MD\input" `
-  --dest "C:\MD\output"
-```
-
-A package is created per source and the extension is part of the package name to avoid collisions:
+A source such as `specification.pdf` produces a collision-safe directory:
 
 ```text
 output/
-├── specification__docx/
-│   ├── specification.docx
-│   ├── specification.md
-│   ├── specification.rag.md
-│   ├── specification.raw.md
-│   ├── images/
-│   ├── publication_images/
-│   ├── manifest.json
-│   ├── document.json
-│   ├── rag.json
-│   └── chunks.jsonl
 └── specification__pdf/
-    └── ...
+    ├── specification.pdf
+    ├── specification.md
+    ├── specification.rag.md
+    ├── manifest.json
+    ├── document.json
+    ├── rag.json
+    ├── chunks.jsonl
+    ├── images/
+    └── publication_images/
 ```
 
-### Files
+`*.raw.md` is disabled by default; it is only a diagnostic copy of the original Xberg Markdown.
 
-- `*.md`: publication/human Markdown. Images can point to display-sized raster derivatives.
-- `*.rag.md`: lean Markdown for RAG. No x/y/width/height metadata is written in the text.
-- `*.raw.md`: raw Xberg Markdown for diagnostics/comparison.
-- `images/`: canonical extracted images, kept at the extraction quality for RAG/multimodal use.
-- `publication_images/`: display-size derivatives used by publication Markdown when source geometry is known.
-- `manifest.json`: provenance, assets, geometry, fidelity warnings, output paths.
-- `document.json`: structured technical metadata without binary payloads.
-- `chunks.jsonl`: heading-aware RAG chunks.
-- `rag.json`: portable descriptor for a future vector/RAG publisher.
+## Document outline and table of contents
 
-## 3. Image size and geometry
+DocSpecBridge tries to preserve semantic heading levels from the strongest source available:
 
-DocSpecBridge 0.2.0b1 treats image display geometry as a cross-format concern:
+- DOCX: Word outline / Heading styles;
+- PDF: PDF bookmark outline; if absent, an internal-link table of contents is detected and its indentation + destinations are used;
+- PPTX: slide titles;
+- fallback: headings already present in Markdown.
 
-- **PPTX**: picture shape `left/top/width/height` through `python-pptx`.
-- **DOCX**: DrawingML/VML image extents from OOXML, including headers/footers where available.
-- **PDF**: image rectangles through PyMuPDF.
+When a real source table of contents is detected, the publication profile replaces the duplicated TOC text with md2conf's native marker:
 
-The source geometry is stored in JSON, not in RAG Markdown.
+```markdown
+[[_TOC_]]
+```
 
-For publication, DocSpecBridge can create a raster derivative close to the source display size. This prevents small PowerPoint icons from becoming giant images in Markdown/Confluence while keeping the original high-resolution image in `images/` for RAG.
+md2conf turns that into a Confluence Table of Contents macro based on the reconstructed headings. The RAG profile removes the duplicated source TOC but retains the heading hierarchy in `heading_path` metadata.
 
-This is still **best effort**. The same binary image can be reused at different sizes in a source; DocSpecBridge maps successive Markdown occurrences to successive source display occurrences where possible.
+## Image fidelity
 
-## 4. Vector content
+Image files and their display geometry are kept separately:
 
-DOCX/PPTX OOXML connectors, grouped shapes, charts, SmartArt/diagram markers and VML shapes are detected and reported in `manifest.json`.
+- `images/`: original extracted assets for RAG / audit;
+- `publication_images/`: display-size variants for publication;
+- `manifest.json`: geometry, source positions, hashes, diagnostics and visual-fidelity warnings.
 
-PDF vector drawing operations are counted through PyMuPDF.
+PPTX, DOCX and PDF image display sizes are recovered when the source format exposes them. Complex vector graphics are detected and reported; they are not silently treated as equivalent to raster images.
 
-0.2.0b1 does **not** yet rasterize arbitrary vector groups automatically. When vector graphics are detected, the fidelity status is marked `partial` and a warning is emitted. This is the next fallback to implement after qualification on real documents.
+## RAG: export vs ingestion
 
-## 5. Publication profile vs RAG profile
+`doc2rag` does **not** pretend that every RAG uses the same vector database or embedding model. It performs the format-neutral part of ingestion:
 
-`docspecbridge.yaml` contains two independent profiles.
+```text
+source docs
+   ↓
+extract / normalize
+   ↓
+semantic headings + clean RAG Markdown
+   ↓
+heading-aware chunks + metadata
+   ↓
+portable RAG corpus
+```
+
+Default corpus structure:
+
+```text
+rag/
+├── corpus.json
+├── index.jsonl
+├── chunks.jsonl
+├── doc2rag-report.json
+└── documents/
+    └── <package>__<document-id>/
+        ├── *.rag.md
+        ├── manifest.json
+        ├── document.json
+        ├── rag.json
+        └── images/
+```
+
+`chunks.jsonl` is the primary generic feed for a downstream loader. Each chunk contains:
+
+- `content`: original chunk text;
+- `heading_path`: semantic location in the document;
+- `embedding_text`: heading breadcrumb + content, ready to embed;
+- `source`: file/type/hash provenance;
+- `document_id` in the aggregated corpus.
+
+Actual vector-store ingestion (embedding model + upsert into a chosen store) is target-specific and is intentionally separate from the portable export.
+
+## Confluence Cloud
+
+Multiple Cloud instances can be configured. Tokens are never stored in YAML; only environment-variable names are stored.
+
+Classic Atlassian API token:
 
 ```yaml
+confluence:
+  default_instance: production
+  instances:
+    production:
+      domain: company.atlassian.net
+      auth_type: classic
+      user_name: user@example.com
+      token_env: ATLASSIAN_API_TOKEN
+      default_space: DOC
+      root_page: "123456789"
+```
+
+Scoped token:
+
+```yaml
+    scoped-production:
+      domain: company.atlassian.net
+      auth_type: scoped
+      user_name: user@example.com
+      token_env: ATLASSIAN_SCOPED_API_TOKEN
+      cloud_id: 00000000-0000-0000-0000-000000000000
+```
+
+The settings UI can add, modify/rename, remove and select instances, list spaces/root pages, and persist a default space / parent page.
+
+### md2conf features enabled/exposed
+
+DocSpecBridge currently uses/exposes:
+
+- deterministic front-matter titles (avoids filename digest titles);
+- inline local image upload;
+- image/table layout settings;
+- heading anchors;
+- optional directory hierarchy in batch publication;
+- page ID persistence in generated Markdown;
+- manual-change overwrite protection;
+- inline-comment policy (`remove` / `check-open`);
+- native Confluence TOC via `[[_TOC_]]`;
+- Mermaid rendering option.
+
+## Configuration
+
+See [`config.example.yaml`](config.example.yaml). Main defaults:
+
+```yaml
+app:
+  source: ./input
+  destination: ./output
+  recursive: true
+
+rag_export:
+  destination: ./rag
+
 profiles:
   publication:
-    enabled: true
-    preserve_image_display_size: true
-
+    table_of_contents:
+      enabled: auto
+      replace_source_toc: true
   rag:
-    enabled: true
-    keep_image_references: true
-    include_header_images: false
-    include_footer_images: false
     chunking:
       enabled: true
       max_characters: 1600
       overlap: 150
-```
+      prepend_heading_context: true
 
-The RAG profile is intentionally conservative: no rewriting/paraphrasing and no aggressive token reduction. Headings, lists, tables, constraints and image references are kept. Repetitive presentation artifacts can be excluded while the original information remains available in the source, raw Markdown and JSON metadata.
-
-## 6. YAML configuration menu
-
-0.1.x could **read** a YAML file but had no editor. 0.2.0b1 adds one.
-
-```powershell
-uv run docspecbridge config
-```
-
-or in the main menu:
-
-```text
-[5] Configuration YAML
-```
-
-The menu can edit:
-
-- source/destination/extensions;
-- recursive extraction;
-- publication and RAG profile switches;
-- chunk sizes;
-- multiple Confluence Cloud instances;
-- the default Confluence instance.
-
-No PAT/token value is stored in YAML; only the environment variable name is stored.
-
-## 7. Multiple Confluence Cloud instances
-
-0.2.0b1 targets **Confluence Cloud only** and uses REST API v2.
-
-Example:
-
-```yaml
 confluence:
-  default_instance: "production"
-  instances:
-    production:
-      domain: "company.atlassian.net"
-      user_name: "user@example.com"
-      token_env: "ATLASSIAN_API_TOKEN"
-      default_space: "DOC"
-      root_page: ""
-
-    sandbox:
-      domain: "company-sandbox.atlassian.net"
-      user_name: "user@example.com"
-      token_env: "ATLASSIAN_SANDBOX_API_TOKEN"
-      default_space: "TEST"
-      root_page: ""
+  keep_hierarchy: false
+  overwrite_manual_changes: false
+  comments: remove
+  write_page_id_to_markdown: true
+  heading_anchors: true
 ```
 
-Then:
+`input`, `output` and the configured RAG corpus directory are created automatically.
+
+## Languages
+
+Interactive UI: French, English, German, Spanish and Chinese (`fr`, `en`, `de`, `es`, `zh`). The OS language is detected on first configuration creation.
+
+## Development
 
 ```powershell
-$env:ATLASSIAN_API_TOKEN="..."
-$env:ATLASSIAN_SANDBOX_API_TOKEN="..."
-
-uv run docspecbridge spaces --instance production
-uv run docspecbridge spaces --instance sandbox
-```
-
-Publication:
-
-```powershell
-uv run docspecbridge publish `
-  --instance production `
-  --source ".\output\specification__docx" `
-  --space DOC `
-  --parent 123456789
-```
-
-The interactive publication menu first asks for the configured instance, then loads the spaces visible with that instance/token.
-
-DocSpecBridge publishes the **publication Markdown**, never the RAG Markdown. Local publication images are uploaded by `markdown-to-confluence` as Confluence page attachments and displayed inline.
-
-## 8. Configuration file
-
-Copy the example:
-
-```powershell
-Copy-Item config.example.yaml docspecbridge.yaml
-```
-
-`docspecbridge.yaml` is intentionally ignored by Git because it contains local paths and account identifiers. `config.example.yaml` belongs in Git.
-
-Legacy 0.1.x YAML with a single `confluence:` endpoint and a top-level `rag:` section is migrated in memory when loaded.
-
-## 9. Useful commands
-
-```powershell
+uv sync
+uv run pytest -q
 uv run docspecbridge doctor
-uv run docspecbridge config
-uv run docspecbridge extract --source .\input --dest .\output
-uv run docspecbridge spaces --instance production
-uv run docspecbridge publish --instance production --source .\output\mydoc__docx --space DOC
 ```
 
-## 10. Mermaid
+Build:
 
-The configuration keeps a `render_mermaid` switch because `markdown-to-confluence` already has Mermaid support. DocSpecBridge 0.2.0b1 does not yet attempt to transform legacy diagrams/images into Mermaid. That remains an enrichment stage for a later version.
+```powershell
+uv build --no-sources
+```
+
+The repository workflow publishes tagged releases to PyPI after build, validation and a wheel smoke test.

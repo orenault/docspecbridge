@@ -29,9 +29,22 @@ def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _normalize_palette_transparency(image: Image.Image) -> Image.Image:
+    """Convert palette images with transparency before Pillow operations.
+
+    Pillow warns when palette (P) images carry transparency as palette metadata /
+    bytes and are converted or resized directly.  RGBA preserves the visible result
+    and avoids the warning.
+    """
+    if image.mode == "P" and "transparency" in image.info:
+        return image.convert("RGBA")
+    return image
+
+
 def _dhash_bytes(payload: bytes) -> str | None:
     try:
         with Image.open(io.BytesIO(payload)) as image:
+            image = _normalize_palette_transparency(image)
             image = image.convert("L").resize((9, 8))
             pixels = list(image.getdata())
         bits = []
@@ -272,11 +285,11 @@ def _docx_occurrences(source: Path, matcher: AssetMatcher) -> tuple[list[dict[st
 
 
 def _pdf_occurrences(source: Path, matcher: AssetMatcher) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    import fitz
+    import pymupdf
 
     occurrences: list[dict[str, Any]] = []
     stats = {"embedded_images": 0, "vector_drawings": 0, "pages": 0}
-    doc = fitz.open(str(source))
+    doc = pymupdf.open(str(source))
     try:
         stats["pages"] = len(doc)
         for page_no, page in enumerate(doc, start=1):
@@ -354,7 +367,7 @@ def collect_image_geometry(
 
     if suffix == ".pdf" and int(stats.get("vector_drawings", 0)):
         warnings.append(
-            f"PDF: {stats['vector_drawings']} objet(s) vectoriel(s) détecté(s). Le texte/images sont extraits, "
+            f"PDF: {stats['vector_drawings']} tracé(s) vectoriel(s) PDF détecté(s). Le texte/images sont extraits, "
             "mais le rendu vectoriel n'est pas encore rasterisé automatiquement."
         )
     return occurrences, stats, warnings
@@ -453,6 +466,7 @@ def build_publication_variants(
                 with Image.open(source_path) as image:
                     if getattr(image, "is_animated", False):
                         image.seek(0)
+                    image = _normalize_palette_transparency(image)
                     resampling = getattr(Image, "Resampling", Image).LANCZOS
                     resized = image.resize((width, height), resample=resampling)
                     if suffix in {".jpg", ".jpeg"} and resized.mode not in {"RGB", "L"}:

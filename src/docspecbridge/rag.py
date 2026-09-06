@@ -71,7 +71,13 @@ def build_rag_markdown(
     return result.strip() + "\n"
 
 
-def chunk_markdown(markdown: str, max_characters: int = 1600, overlap: int = 150) -> list[dict[str, Any]]:
+def chunk_markdown(
+    markdown: str,
+    max_characters: int = 1600,
+    overlap: int = 150,
+    *,
+    prepend_heading_context: bool = True,
+) -> list[dict[str, Any]]:
     """Simple heading-aware chunker for the MVP.
 
     It intentionally preserves Markdown tables and list lines as textual content and
@@ -153,6 +159,13 @@ def chunk_markdown(markdown: str, max_characters: int = 1600, overlap: int = 150
         if buffer:
             chunk_id += 1
             chunks.append({"id": chunk_id, "heading_path": path, "content": buffer})
+
+    for chunk in chunks:
+        path = [str(item) for item in (chunk.get("heading_path") or []) if item]
+        if prepend_heading_context and path:
+            chunk["embedding_text"] = " > ".join(path) + "\n\n" + str(chunk.get("content") or "")
+        else:
+            chunk["embedding_text"] = str(chunk.get("content") or "")
     return chunks
 
 
@@ -163,6 +176,7 @@ def write_chunks_jsonl(path: Path, chunks: list[dict[str, Any]], source_metadata
                 "id": chunk["id"],
                 "heading_path": chunk.get("heading_path") or [],
                 "content": chunk["content"],
+                "embedding_text": chunk.get("embedding_text", chunk["content"]),
                 "source": source_metadata,
             }
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")

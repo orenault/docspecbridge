@@ -1,4 +1,6 @@
 app:
+  # fr / en / de / es / zh. On first run DocSpecBridge detects the OS language.
+  language: fr
   source: "./input"
   destination: "./output"
   extensions:
@@ -28,12 +30,10 @@ extract:
 
   deduplicate_assets: true
 
-  # Word headers/footers are page-oriented. For publication, keep header artwork once.
   docx_layout:
     include_header_images_once: true
     include_footer_images_once: false
 
-  # PDF can repeat a logo/watermark on every page.
   pdf_layout:
     collapse_repeated_images: true
     repeat_threshold: 3
@@ -46,24 +46,28 @@ extract:
   diagnostics:
     inspect_ooxml: true
     warn_on_unresolved_images: true
-    keep_raw_xberg_markdown: true
+    # Off by default: raw Xberg Markdown is a troubleshooting artifact only.
+    keep_raw_xberg_markdown: false
 
 profiles:
   publication:
     enabled: true
-    # DOCX/PPTX/PDF source geometry is stored in manifest.json.
-    # When possible, a raster derivative is generated at the source display size.
     preserve_image_display_size: true
     display_image_directory: "publication_images"
     min_display_px: 12
     max_display_px: 1800
     avoid_upscale: false
     preserve_formatting: true
+    # Adds a deterministic title in front matter so Confluence does not use filename+digest.
+    add_title_front_matter: true
+    table_of_contents:
+      # auto = replace a detected source TOC with md2conf's native Confluence TOC macro.
+      enabled: auto
+      replace_source_toc: true
 
   rag:
     enabled: true
     write_descriptor: true
-    # RAG Markdown intentionally does NOT contain x/y/width/height metadata.
     keep_image_references: true
     include_header_images: false
     include_footer_images: false
@@ -75,42 +79,54 @@ profiles:
       overlap: 150
       prepend_heading_context: true
 
+rag_export:
+  # Target-neutral corpus export used by `docspecbridge doc2rag` / `rag-export`.
+  destination: "./rag"
+  copy_assets: true
+  copy_document_json: true
+  overwrite: true
+
 confluence:
-  # Cloud only in DocSpecBridge 0.2.0b1. All instances use REST API v2.
   default_instance: "production"
 
   instances:
     production:
+      # Cloud only. Store a bare host; https:// and trailing slash are normalized automatically.
       domain: "company.atlassian.net"
-      base_path: "/wiki/"
-      # Optional: for an Atlassian scoped API token, set the ex/confluence/CLOUD_ID URL.
-      api_url: ""
-      # Classic API token/basic auth: put the Atlassian account email here.
-      # Leave blank for Bearer/scoped token auth.
-      user_name: ""
-      # Secret value is NEVER stored in YAML.
+      auth_type: "classic"
+      user_name: "user@example.com"
       token_env: "ATLASSIAN_API_TOKEN"
+      cloud_id: ""
+      api_url: ""
+      base_path: "/wiki/"
+      api_version: "v2"
       default_space: ""
       root_page: ""
 
-    # Example second Cloud instance:
-    # sandbox:
-    #   domain: "company-sandbox.atlassian.net"
-    #   base_path: "/wiki/"
-    #   api_url: ""
+    # Example with an API token with scopes:
+    # scoped-production:
+    #   domain: "company.atlassian.net"
+    #   auth_type: "scoped"
     #   user_name: "user@example.com"
-    #   token_env: "ATLASSIAN_SANDBOX_API_TOKEN"
-    #   default_space: "TEST"
+    #   token_env: "ATLASSIAN_SCOPED_API_TOKEN"
+    #   cloud_id: "00000000-0000-0000-0000-000000000000"
+    #   api_url: "https://api.atlassian.com/ex/confluence/00000000-0000-0000-0000-000000000000"
+    #   base_path: "/wiki/"
+    #   api_version: "v2"
+    #   default_space: ""
     #   root_page: ""
 
   keep_hierarchy: false
   overwrite_manual_changes: false
-  write_page_id_to_markdown: false
+  comments: "remove"          # remove | check-open
+  write_page_id_to_markdown: true
+  heading_anchors: true
 
   layout:
+    alignment: "center"
     image_alignment: "center"
     image_max_width: 1600
+    table_width: null
     table_display_mode: "responsive"
 
-  # Reserved for later Mermaid strategy. md2conf can already render Mermaid.
   render_mermaid: false

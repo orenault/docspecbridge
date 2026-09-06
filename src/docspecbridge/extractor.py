@@ -16,6 +16,7 @@ from xberg import ExtractInput, extract
 from . import __version__
 from .geometry import build_publication_variants, collect_image_geometry
 from .ooxml import inspect_ooxml, read_ooxml_media
+from .outline import apply_outline, extract_outline, publication_toc, rag_without_toc
 from .rag import build_rag_markdown, chunk_markdown, write_chunks_jsonl
 from .utils import json_safe, safe_stem, sha256_file, write_json
 
@@ -25,6 +26,12 @@ from .utils import json_safe, safe_stem, sha256_file, write_json
 IMAGE_RE = re.compile(r"(?P<escaped>\\?)!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
 EMBEDDED_RE = re.compile(r"^embedded:(?P<token>.+)$")
 XBERG_LOCAL_IMAGE_RE = re.compile(r"^(?:\./)?(?:.*/)?image_(?P<index>\d+)(?:\.[A-Za-z0-9]+)?$")
+
+
+def _publication_front_matter(markdown: str, title: str) -> str:
+    """Add deterministic YAML front matter for md2conf page title selection."""
+    escaped = title.replace("\\", "\\\\").replace('"', '\"')
+    return f'---\ntitle: "{escaped}"\n---\n\n' + markdown.lstrip()
 
 
 @dataclass
@@ -178,10 +185,24 @@ class XbergExtractor:
                     min_occurrences=int(pdf_layout_cfg.get("repeat_threshold", 3)),
                 )
 
+            # Recover document outline / heading levels from the strongest available
+            # source (DOCX styles, PDF bookmarks, PPTX slide titles, then Markdown).
+            # A detected source table of contents is replaced by a neutral placeholder:
+            # publication turns it into a native Confluence TOC; RAG drops it to avoid
+            # indexing duplicate navigation text.
+            outline_entries, outline_source = extract_outline(source, markdown)
+            toc_cfg = (publication_cfg.get("table_of_contents") or {})
+            outline_result = apply_outline(
+                markdown,
+                outline_entries,
+                replace_source_toc=bool(toc_cfg.get("replace_source_toc", True)),
+            )
+            outcome.warnings.extend(outline_result.warnings)
+
             # Keep the normalized Markdown as the semantic canonical body. Rich layout
             # information is stored separately and a publication-specific derivative is
             # generated without polluting RAG text with geometry metadata.
-            canonical_markdown = markdown.rstrip() + "\n"
+            canonical_markdown = outline_result.markdown.rstrip() + "\n"
             stem = safe_stem(source.stem)
 
             if diagnostics_cfg.get("keep_raw_xberg_markdown", True):
@@ -195,7 +216,10 @@ class XbergExtractor:
             )
             outcome.warnings.extend(geometry_warnings)
 
-            publication_markdown = canonical_markdown
+            publication_markdown = publication_toc(
+                canonical_markdown,
+                enabled=toc_cfg.get("enabled", "auto"),
+            )
             publication_variants: list[dict[str, Any]] = []
             if publication_cfg.get("enabled", True):
                 publication_markdown, publication_variants, publication_warnings = build_publication_variants(
@@ -206,6 +230,8 @@ class XbergExtractor:
                     IMAGE_RE,
                 )
                 outcome.warnings.extend(publication_warnings)
+            if publication_cfg.get("add_title_front_matter", True):
+                publication_markdown = _publication_front_matter(publication_markdown, source.stem)
             md_path = package_dir / f"{stem}.md"
             md_path.write_text(publication_markdown.rstrip() + "\n", encoding="utf-8")
             outcome.markdown = md_path
@@ -215,7 +241,7 @@ class XbergExtractor:
             rag_descriptor_path: Path | None = None
             chunks: list[dict[str, Any]] = []
             if rag_cfg.get("enabled", True):
-                rag_markdown = build_rag_markdown(canonical_markdown, image_meta, rag_cfg)
+                rag_markdown = build_rag_markdown(rag_without_toc(canonical_markdown), image_meta, rag_cfg)
                 rag_md_path = package_dir / f"{stem}.rag.md"
                 rag_md_path.write_text(rag_markdown, encoding="utf-8")
                 chunk_cfg = rag_cfg.get("chunking") or {}
@@ -224,6 +250,7 @@ class XbergExtractor:
                         rag_markdown,
                         max_characters=int(chunk_cfg.get("max_characters", 1600)),
                         overlap=int(chunk_cfg.get("overlap", 150)),
+                        prepend_heading_context=bool(chunk_cfg.get("prepend_heading_context", True)),
                     )
                     chunks_path = package_dir / "chunks.jsonl"
                     write_chunks_jsonl(
@@ -310,6 +337,14 @@ class XbergExtractor:
                     "occurrences": geometry_occurrences,
                     "stats": geometry_stats,
                 },
+                "outline": {
+                    "source": outline_source,
+                    "entries": outline_result.outline,
+                    "heading_count": len(outline_result.outline),
+                    "headings_applied": outline_result.headings_applied,
+                    "source_toc_detected": outline_result.toc_detected,
+                    "confluence_toc": bool(outline_result.toc_detected and str(toc_cfg.get("enabled", "auto")).lower() not in {"false", "off", "no", "0"}),
+                },
                 "xberg": {
                     "mime_type": getattr(document, "mime_type", None),
                     "quality_score": getattr(document, "quality_score", None),
@@ -333,6 +368,7 @@ class XbergExtractor:
                 "xberg": manifest["xberg"],
                 "assets": image_meta,
                 "geometry": manifest["geometry"],
+                "outline": manifest["outline"],
                 "visual_fidelity": fidelity,
                 "tables": json_safe(getattr(document, "tables", None)),
                 "metadata": json_safe(getattr(document, "metadata", None)),
