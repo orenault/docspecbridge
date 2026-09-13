@@ -15,10 +15,15 @@ from xberg import ExtractInput, extract
 
 from . import __version__
 from .geometry import build_publication_variants, collect_image_geometry
+from .docx_publication import build_docx_publication
 from .ooxml import inspect_ooxml, read_ooxml_media
 from .outline import apply_outline, extract_outline, publication_toc, rag_without_toc
 from .rag import build_rag_markdown, chunk_markdown, write_chunks_jsonl
 from .utils import json_safe, safe_stem, sha256_file, write_json
+from .canonical import canonical_from_xhtml
+from .html_io import canonical_from_html_source, canonical_from_markdown
+from .package_io import write_canonical_package
+from .title_detection import apply_detected_title
 
 
 # Xberg sometimes escapes image markers as `\![...](...)`, notably for PPTX.
@@ -26,6 +31,7 @@ from .utils import json_safe, safe_stem, sha256_file, write_json
 IMAGE_RE = re.compile(r"(?P<escaped>\\?)!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
 EMBEDDED_RE = re.compile(r"^embedded:(?P<token>.+)$")
 XBERG_LOCAL_IMAGE_RE = re.compile(r"^(?:\./)?(?:.*/)?image_(?P<index>\d+)(?:\.[A-Za-z0-9]+)?$")
+HTML_IMAGE_RE = re.compile(r"<img\b[^>]*?\bsrc=[\"\'](?P<target>[^\"\']+)[\"\'][^>]*/?>", re.I)
 
 
 def _publication_front_matter(markdown: str, title: str) -> str:
@@ -97,6 +103,39 @@ class XbergExtractor:
             if app_cfg.get("copy_source", True):
                 if source.resolve() != source_copy.resolve():
                     shutil.copy2(source, source_copy)
+
+            # Native structured-text sources do not need Xberg. HTML/Markdown enter
+            # the same CanonicalDocument pipeline as Office/PDF, then all target views
+            # are rendered from that canonical representation.
+            if source.suffix.lower() in {".html", ".htm", ".md", ".markdown"}:
+                profiles_cfg = self.config.get("profiles") or {}
+                publication_cfg = profiles_cfg.get("publication") or {}
+                rag_cfg = profiles_cfg.get("rag") or {}
+                if source.suffix.lower() in {".html", ".htm"}:
+                    doc, native_warnings, _ = canonical_from_html_source(
+                        source,
+                        package_dir=package_dir,
+                        fetch_config=(self.config.get("html") or {}).get("fetch") or {},
+                    )
+                    outcome.warnings.extend(native_warnings)
+                else:
+                    text = source.read_text(encoding="utf-8", errors="replace")
+                    doc = canonical_from_markdown(
+                        text, title=source.stem,
+                        source={"type": "markdown", "original_path": str(source), "extension": source.suffix.lower()},
+                    )
+                    apply_detected_title(doc, source)
+                outputs = write_canonical_package(
+                    doc, package_dir, stem=safe_stem(source.stem),
+                    rag_profile=rag_cfg, publication_profile=publication_cfg,
+                    warnings=outcome.warnings, source_sha256=sha256_file(source),
+                    extra_manifest={"engine": "canonical-native"},
+                )
+                outcome.markdown = outputs["human_markdown"]
+                images_dir = package_dir / "images"
+                if images_dir.is_dir():
+                    outcome.images.extend(sorted(p for p in images_dir.iterdir() if p.is_file()))
+                return outcome
 
             extract_cfg = self.config["extract"]
             xberg_cfg: dict[str, Any] = {
@@ -199,13 +238,13 @@ class XbergExtractor:
             )
             outcome.warnings.extend(outline_result.warnings)
 
-            # Keep the normalized Markdown as the semantic canonical body. Rich layout
-            # information is stored separately and a publication-specific derivative is
-            # generated without polluting RAG text with geometry metadata.
+            # 0.4: the normalized Xberg Markdown is an input signal, not the canonical
+            # document. DOCX gets its structural truth from Mammoth+OOXML; other Xberg
+            # formats use the normalized Markdown as a conservative adapter input.
             canonical_markdown = outline_result.markdown.rstrip() + "\n"
             stem = safe_stem(source.stem)
 
-            if diagnostics_cfg.get("keep_raw_xberg_markdown", True):
+            if diagnostics_cfg.get("keep_raw_xberg_markdown", False):
                 raw_path = package_dir / f"{stem}.raw.md"
                 raw_path.write_text((document.content or "").rstrip() + "\n", encoding="utf-8")
             else:
@@ -216,61 +255,71 @@ class XbergExtractor:
             )
             outcome.warnings.extend(geometry_warnings)
 
-            publication_markdown = publication_toc(
-                canonical_markdown,
-                enabled=toc_cfg.get("enabled", "auto"),
-            )
-            publication_variants: list[dict[str, Any]] = []
-            if publication_cfg.get("enabled", True):
-                publication_markdown, publication_variants, publication_warnings = build_publication_variants(
-                    canonical_markdown,
-                    package_dir,
-                    image_meta,
-                    publication_cfg,
-                    IMAGE_RE,
+            publication_metadata: dict[str, Any] = {"engine": "canonical-renderer"}
+            doc = None
+            if publication_cfg.get("enabled", True) and source.suffix.lower() == ".docx":
+                docx_pub_cfg = publication_cfg.get("docx") or {}
+                use_mammoth = str(docx_pub_cfg.get("engine") or "mammoth-html").lower() in {"mammoth", "mammoth-html", "html"}
+                if use_mammoth:
+                    try:
+                        docx_publication = build_docx_publication(
+                            source,
+                            package_dir,
+                            image_meta,
+                            publication_cfg,
+                            toc_detected=outline_result.toc_detected,
+                        )
+                        publication_metadata = docx_publication.metadata
+                        outcome.warnings.extend(docx_publication.warnings)
+                        if docx_publication.added_assets:
+                            image_meta.extend(docx_publication.added_assets)
+                            for item in docx_publication.added_assets:
+                                rel = str(item.get("file") or "")
+                                if rel:
+                                    added = package_dir / rel
+                                    if added.is_file() and added not in outcome.images:
+                                        outcome.images.append(added)
+                        doc = canonical_from_xhtml(
+                            docx_publication.content,
+                            title=source.stem,
+                            source={
+                                "type": "docx",
+                                "original_path": str(source),
+                                "packaged_file": source.name if app_cfg.get("copy_source", True) else None,
+                                "extension": source.suffix.lower(),
+                            },
+                            assets=image_meta,
+                            header_assets_once=bool(docx_layout_cfg.get("include_header_images_once", True)),
+                        )
+                    except Exception as exc:
+                        outcome.warnings.append(
+                            f"Publication DOCX Mammoth indisponible ({exc}); repli canonique sur le Markdown Xberg."
+                        )
+                        publication_metadata = {"engine": "canonical-xberg-fallback", "fallback_from": "mammoth-html"}
+
+            if doc is None:
+                doc = canonical_from_markdown(
+                    rag_without_toc(canonical_markdown),
+                    title=source.stem,
+                    source={
+                        "type": source.suffix.lower().lstrip("."),
+                        "original_path": str(source),
+                        "packaged_file": source.name if app_cfg.get("copy_source", True) else None,
+                        "extension": source.suffix.lower(),
+                    },
                 )
-                outcome.warnings.extend(publication_warnings)
-            if publication_cfg.get("add_title_front_matter", True):
-                publication_markdown = _publication_front_matter(publication_markdown, source.stem)
-            md_path = package_dir / f"{stem}.md"
-            md_path.write_text(publication_markdown.rstrip() + "\n", encoding="utf-8")
-            outcome.markdown = md_path
+                doc["assets"] = image_meta
+                # Preserve source TOC as a semantic marker for target renderers when one
+                # was reliably detected, but never preserve obsolete Word/PDF page numbers.
+                if outline_result.toc_detected:
+                    insert_at = next((i for i, b in enumerate(doc["blocks"]) if b.get("type") == "heading"), 0)
+                    doc["blocks"].insert(insert_at, {"type": "toc"})
 
-            rag_md_path: Path | None = None
-            chunks_path: Path | None = None
-            rag_descriptor_path: Path | None = None
-            chunks: list[dict[str, Any]] = []
-            if rag_cfg.get("enabled", True):
-                rag_markdown = build_rag_markdown(rag_without_toc(canonical_markdown), image_meta, rag_cfg)
-                rag_md_path = package_dir / f"{stem}.rag.md"
-                rag_md_path.write_text(rag_markdown, encoding="utf-8")
-                chunk_cfg = rag_cfg.get("chunking") or {}
-                if chunk_cfg.get("enabled", True):
-                    chunks = chunk_markdown(
-                        rag_markdown,
-                        max_characters=int(chunk_cfg.get("max_characters", 1600)),
-                        overlap=int(chunk_cfg.get("overlap", 150)),
-                        prepend_heading_context=bool(chunk_cfg.get("prepend_heading_context", True)),
-                    )
-                    chunks_path = package_dir / "chunks.jsonl"
-                    write_chunks_jsonl(
-                        chunks_path,
-                        chunks,
-                        {
-                            "file": source.name,
-                            "type": source.suffix.lower().lstrip("."),
-                            "sha256": sha256_file(source),
-                        },
-                    )
-
-            if ooxml:
-                expected_content_images = int(ooxml.get("content_media_count", ooxml.get("media_count", 0)))
-                xberg_payload_count = sum(1 for image in image_objects if self._image_payload(image) is not None)
-                if expected_content_images > xberg_payload_count:
-                    outcome.warnings.append(
-                        f"OOXML référence {expected_content_images} média(s) dans le contenu principal, "
-                        f"Xberg en a restitué {xberg_payload_count}. Certaines figures peuvent manquer."
-                    )
+            # Canonical title is detected once at source-adapter time and reused by
+            # Confluence/HTML/Jira. Filename remains a deterministic fallback.
+            apply_detected_title(
+                doc, source, xberg_metadata=json_safe(getattr(document, "metadata", None))
+            )
 
             if ooxml:
                 markers = dict(ooxml.get("markers") or {})
@@ -285,15 +334,14 @@ class XbergExtractor:
                     details = ", ".join(f"{k}={v}" for k, v in risky.items() if v)
                     outcome.warnings.append(
                         "Contenu graphique/vectoriel OOXML détecté (" + details + "). "
-                        "Le texte et les images raster sont extraits, mais la géométrie visuelle peut être partiellement perdue."
+                        "La structure est enregistrée dans le canonique/manifest; le rendu visuel peut rester partiel."
                     )
-
-            if diagnostics_cfg.get("warn_on_unresolved_images", True):
-                broken = self._find_broken_local_image_refs(publication_markdown, package_dir)
-                if broken:
-                    outcome.warnings.append(
-                        "Référence(s) image Markdown non résolue(s): " + ", ".join(sorted(set(broken)))
-                    )
+                    doc["graphics"] = {
+                        "vector_detected": True,
+                        "counts": risky,
+                        "render_status": "partial",
+                        "mermaid_status": "not-generated",
+                    }
 
             pdf_vector_count = int((geometry_stats or {}).get("vector_drawings", 0))
             fidelity = self._visual_fidelity(ooxml)
@@ -304,93 +352,75 @@ class XbergExtractor:
                     "vector_graphics_detected": True,
                     "pdf_vector_drawings": pdf_vector_count,
                 }
+                doc.setdefault("graphics", {}).update({
+                    "vector_detected": True,
+                    "pdf_vector_drawings": pdf_vector_count,
+                    "render_status": "partial",
+                    "mermaid_status": "not-generated",
+                })
 
-            manifest = {
-                "schema_version": "0.2",
-                "docspecbridge_version": __version__,
-                "engine": "xberg",
-                "source": {
-                    "original_path": str(source),
-                    "packaged_file": source.name if app_cfg.get("copy_source", True) else None,
-                    "extension": source.suffix.lower(),
-                    "sha256": sha256_file(source),
+            outputs = write_canonical_package(
+                doc,
+                package_dir,
+                stem=stem,
+                rag_profile=rag_cfg,
+                publication_profile=publication_cfg,
+                warnings=outcome.warnings,
+                source_sha256=sha256_file(source),
+                extra_manifest={
+                    "engine": "canonical-v1",
+                    "xberg": {
+                        "mime_type": getattr(document, "mime_type", None),
+                        "quality_score": getattr(document, "quality_score", None),
+                        "processing_warnings": json_safe(getattr(document, "processing_warnings", [])),
+                        "metadata": json_safe(getattr(document, "metadata", None)),
+                    },
+                    "ooxml_diagnostics": ooxml,
+                    "geometry": {"occurrences": geometry_occurrences, "stats": geometry_stats},
+                    "outline": {
+                        "source": outline_source,
+                        "entries": outline_result.outline,
+                        "heading_count": len(outline_result.outline),
+                        "headings_applied": outline_result.headings_applied,
+                        "source_toc_detected": outline_result.toc_detected,
+                    },
+                    "visual_fidelity": fidelity,
+                    "publication": publication_metadata,
+                    "image_normalization": {
+                        **dedup_stats,
+                        "collapsed_repeated_markdown_references": collapsed_refs,
+                    },
                 },
-                "outputs": {
-                    "publication_markdown": md_path.name,
-                    "rag_markdown": rag_md_path.name if rag_md_path else None,
-                    "raw_xberg_markdown": raw_path.name if raw_path else None,
-                    "chunks": chunks_path.name if chunks_path else None,
-                    "document_json": "document.json",
-                    "manifest": "manifest.json",
-                },
-                "assets": {
-                    "images_directory": "images",
-                    "publication_images_directory": publication_cfg.get("display_image_directory", "publication_images"),
-                    "images": image_meta,
-                    "publication_variants": publication_variants,
-                },
-                "image_normalization": {
-                    **dedup_stats,
-                    "collapsed_repeated_markdown_references": collapsed_refs,
-                },
-                "geometry": {
-                    "occurrences": geometry_occurrences,
-                    "stats": geometry_stats,
-                },
-                "outline": {
-                    "source": outline_source,
-                    "entries": outline_result.outline,
-                    "heading_count": len(outline_result.outline),
-                    "headings_applied": outline_result.headings_applied,
-                    "source_toc_detected": outline_result.toc_detected,
-                    "confluence_toc": bool(outline_result.toc_detected and str(toc_cfg.get("enabled", "auto")).lower() not in {"false", "off", "no", "0"}),
-                },
-                "xberg": {
-                    "mime_type": getattr(document, "mime_type", None),
-                    "quality_score": getattr(document, "quality_score", None),
-                    "processing_warnings": json_safe(getattr(document, "processing_warnings", [])),
-                    "metadata": json_safe(getattr(document, "metadata", None)),
-                },
-                "ooxml_diagnostics": ooxml,
-                "visual_fidelity": fidelity,
-                "profiles": {
-                    "publication": publication_cfg,
-                    "rag": rag_cfg,
-                },
-                "warnings": outcome.warnings,
-                "rag_ready": bool(rag_md_path),
-            }
-            write_json(package_dir / "manifest.json", manifest)
+            )
+            outcome.markdown = outputs["human_markdown"]
 
-            document_json = {
-                "schema_version": "0.2",
-                "source": manifest["source"],
-                "xberg": manifest["xberg"],
-                "assets": image_meta,
-                "geometry": manifest["geometry"],
-                "outline": manifest["outline"],
-                "visual_fidelity": fidelity,
-                "tables": json_safe(getattr(document, "tables", None)),
-                "metadata": json_safe(getattr(document, "metadata", None)),
-            }
-            write_json(package_dir / "document.json", document_json)
+            if raw_path is not None:
+                manifest_path = package_dir / "manifest.json"
+                try:
+                    import json as _json
+                    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest.setdefault("outputs", {})["raw_xberg_markdown"] = raw_path.name
+                    write_json(manifest_path, manifest)
+                except Exception:
+                    pass
 
-            if rag_md_path and rag_cfg.get("write_descriptor", True):
-                rag_descriptor = {
-                    "source": source.name,
-                    "markdown": rag_md_path.name,
-                    "assets": sorted({str(item.get("file")) for item in image_meta if item.get("file")}),
-                    "manifest": "manifest.json",
-                    "document": "document.json",
-                    "chunks": chunks_path.name if chunks_path else None,
-                    "chunk_count": len(chunks),
-                    "token_reduction": rag_cfg.get("token_reduction", "off"),
-                    "notes": (
-                        "RAG profile strips layout-only metadata from Markdown. Geometry/provenance remain in manifest/document JSON."
-                    ),
-                }
-                rag_descriptor_path = package_dir / "rag.json"
-                write_json(rag_descriptor_path, rag_descriptor)
+            if diagnostics_cfg.get("warn_on_unresolved_images", True):
+                confluence_render = outputs.get("confluence_markdown")
+                if confluence_render:
+                    broken = self._find_broken_local_image_refs(Path(confluence_render).read_text(encoding="utf-8"), Path(confluence_render).parent)
+                    if broken:
+                        outcome.warnings.append(
+                            "Référence(s) image de rendu non résolue(s): " + ", ".join(sorted(set(broken)))
+                        )
+
+            if ooxml:
+                expected_content_images = int(ooxml.get("content_media_count", ooxml.get("media_count", 0)))
+                xberg_payload_count = sum(1 for image in image_objects if self._image_payload(image) is not None)
+                if expected_content_images > xberg_payload_count:
+                    outcome.warnings.append(
+                        f"OOXML référence {expected_content_images} média(s) dans le contenu principal, "
+                        f"Xberg en a restitué {xberg_payload_count}. Certaines figures peuvent manquer."
+                    )
 
         except Exception as exc:
             outcome.error = str(exc)
@@ -841,8 +871,9 @@ class XbergExtractor:
     @staticmethod
     def _find_broken_local_image_refs(markdown: str, package_dir: Path) -> list[str]:
         broken: list[str] = []
-        for match in IMAGE_RE.finditer(markdown):
-            target = match.group("target").strip()
+        targets: list[str] = [match.group("target").strip() for match in IMAGE_RE.finditer(markdown)]
+        targets.extend(match.group("target").strip() for match in HTML_IMAGE_RE.finditer(markdown))
+        for target in targets:
             lowered = target.lower()
             if lowered.startswith(("http://", "https://", "data:", "#")):
                 continue

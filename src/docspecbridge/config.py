@@ -15,7 +15,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "language": "auto",
         "source": "./input",
         "destination": "./output",
-        "extensions": [".docx", ".pdf", ".pptx"],
+        "extensions": [".docx", ".pdf", ".pptx", ".html", ".htm", ".md"],
         "recursive": True,
         "preserve_source_tree": True,
         "copy_source": True,
@@ -67,6 +67,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "max_display_px": 1800,
             "avoid_upscale": False,
             "preserve_formatting": True,
+            "docx": {
+                # Mammoth semantic XHTML + OOXML feed CanonicalDocument because
+                # Markdown cannot losslessly represent merged cells and Word layout.
+                "engine": "mammoth-html",
+                "preserve_merged_cells": True,
+                "preserve_lists": True,
+                "preserve_highlight_colors": True,
+                "preserve_cell_shading": True,
+                "preserve_cell_text_color": True,
+                # Floating DrawingML/VML textbox geometry cannot be represented in
+                # Markdown/XHTML. Prevent labels positioned over screenshots from
+                # becoming misleading standalone paragraphs in the publication view.
+                "suppress_floating_textboxes_in_flow": True,
+            },
             # Gives md2conf a deterministic page title and prevents filename+digest titles.
             "add_title_front_matter": True,
             "table_of_contents": {
@@ -96,9 +110,37 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "copy_document_json": True,
         "overwrite": True,
     },
+    "canonical": {
+        "schema_version": "1.0",
+        "validate": True,
+        "write_html": True,
+    },
+    "html": {
+        "fetch": {
+            "prefer_main": True,
+            "download_images": True,
+            "copy_local_images": True,
+            "timeout_seconds": 30,
+            "user_agent": "DocSpecBridge/0.4.2",
+        },
+    },
+    "jira": {
+        # If empty, Jira commands reuse matching Confluence instance settings.
+        "default_instance": "",
+        "instances": {},
+        "export": {
+            "include_comments": False,
+            "include_attachments": True,
+        },
+    },
     "confluence": {
         "default_instance": "",
         "instances": {},
+        # Parent selector always exposes the real space homepage as the visible root. max_depth 0 adds
+        # first-level pages, 1 adds children, 2 adds grandchildren.
+        "page_selector": {"max_depth": 0},
+        # Confluence 2026 page width: narrow | wide | max | confluence-default.
+        "page_width": "max",
         "layout": {
             "alignment": "center",
             "image_alignment": "center",
@@ -109,8 +151,33 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keep_hierarchy": False,
         "overwrite_manual_changes": False,
         "comments": "remove",
-        "write_page_id_to_markdown": True,
+        # DocSpecBridge keeps publication identity in publication_state.json instead
+        # of mutating render_document.md with a destination-specific page ID.
+        "write_page_id_to_markdown": False,
+        "publication": {
+            "default_mode": "replace",
+            "page_title_source": "document_title",
+            "add_title_suffix": " ({n})",
+            "verify_after_publish": True,
+        },
         "heading_anchors": True,
+        # Fine-grained md2conf converter settings. Diagram renderers are disabled by
+        # default because they require external executables; users can opt in.
+        "converter": {
+            "force_valid_url": True,
+            "skip_title_heading": False,
+            "prefer_raster": True,
+            "render_drawio": False,
+            "render_mermaid": False,
+            "render_plantuml": False,
+            "render_latex": False,
+            "diagram_output_format": "png",
+            "webui_links": False,
+            "user_mentions": True,
+            "use_panel": False,
+            "force_valid_language": True,
+        },
+        # Legacy key kept for backward compatibility with 0.2.1 YAML files.
         "render_mermaid": False,
     },
 }
@@ -232,7 +299,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Configuration YAML invalide: {selected}")
     cfg = _deep_merge(DEFAULT_CONFIG, _migrate_legacy(data))
-    cfg["app"]["language"] = normalize_language(str(cfg["app"].get("language") or detect_os_language()))
+    configured_language = str(cfg["app"].get("language") or "auto").strip().lower()
+    cfg["app"]["language"] = detect_os_language() if configured_language in {"", "auto"} else normalize_language(configured_language)
     return cfg
 
 

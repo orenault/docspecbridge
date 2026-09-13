@@ -7,6 +7,9 @@ app:
     - ".docx"
     - ".pdf"
     - ".pptx"
+    - ".html"
+    - ".htm"
+    - ".md"
   recursive: true
   preserve_source_tree: true
   copy_source: true
@@ -58,6 +61,18 @@ profiles:
     max_display_px: 1800
     avoid_upscale: false
     preserve_formatting: true
+    docx:
+      # Mammoth + OOXML feed CanonicalDocument. Human Markdown, RAG and the
+      # technical Confluence renderer are then produced independently from the canon.
+      engine: "mammoth-html"
+      preserve_merged_cells: true
+      preserve_lists: true
+      preserve_highlight_colors: true
+      preserve_cell_shading: true
+      preserve_cell_text_color: true
+      # Hide text that only lives in floating DrawingML/VML text boxes. Without
+      # geometry these labels can otherwise appear as misleading standalone lines.
+      suppress_floating_textboxes_in_flow: true
     # Adds a deterministic title in front matter so Confluence does not use filename+digest.
     add_title_front_matter: true
     table_of_contents:
@@ -116,11 +131,26 @@ confluence:
     #   default_space: ""
     #   root_page: ""
 
+  # Parent selector always includes the real space homepage as the visible root choice.
+  # 0 = space root + first-level pages, 1 = + children, 2 = + grandchildren.
+  page_selector:
+    max_depth: 0
+
+  # Confluence page width: narrow | wide | max | confluence-default.
+  page_width: "max"
+
   keep_hierarchy: false
   overwrite_manual_changes: false
   comments: "remove"          # remove | check-open
-  write_page_id_to_markdown: true
+  # Kept only for backward-compatible YAML loading. 0.4.2 never mutates render_document.md.
+  write_page_id_to_markdown: false
   heading_anchors: true
+
+  publication:
+    default_mode: "replace"            # replace | add
+    page_title_source: "document_title" # document_title | filename
+    add_title_suffix: " ({n})"
+    verify_after_publish: true
 
   layout:
     alignment: "center"
@@ -129,4 +159,42 @@ confluence:
     table_width: null
     table_display_mode: "responsive"
 
+  # md2conf converter features. Diagram renderers need external tools and are
+  # therefore opt-in; the remaining options use safe Cloud-oriented defaults.
+  converter:
+    force_valid_url: true
+    skip_title_heading: false
+    prefer_raster: true
+    render_drawio: false
+    render_mermaid: false
+    render_plantuml: false
+    render_latex: false
+    diagram_output_format: "png"
+    webui_links: false
+    user_mentions: true
+    use_panel: false
+    force_valid_language: true
+
+  # Deprecated compatibility key. Prefer confluence.converter.render_mermaid.
   render_mermaid: false
+
+canonical:
+  schema_version: "1.0"
+  validate: true
+  write_html: true
+
+html:
+  fetch:
+    prefer_main: true
+    download_images: true
+    copy_local_images: true
+    timeout_seconds: 30
+    user_agent: "DocSpecBridge/0.4.2"
+
+jira:
+  # Optional. If instances is empty, jira2md/md2jira reuse Confluence instance credentials.
+  default_instance: ""
+  instances: {}
+  export:
+    include_comments: false
+    include_attachments: true

@@ -131,7 +131,7 @@ def export_rag_corpus(
                     chunk_count += 1
 
     corpus = {
-        "schema_version": "0.2.1",
+        "schema_version": "0.4",
         "kind": "docspecbridge-rag-corpus",
         "documents": document_count,
         "chunks": chunk_count,

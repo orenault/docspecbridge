@@ -1,7 +1,7 @@
 [project]
 name = "docspecbridge"
-version = "0.2.1"
-description = "Document ETL bridge: Office/PDF -> Markdown + images -> Confluence/RAG-ready packages"
+version = "0.4.2"
+description = "Canonical specification bridge: Office/PDF/HTML/Markdown/Confluence/Jira -> Markdown, HTML, RAG, Confluence and Jira"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -11,11 +11,15 @@ authors = [
 dependencies = [
   "xberg==1.0.14",
   "markdown-to-confluence==0.6.3",
+  "mammoth==1.12.1",
+  "lxml>=6,<7",
   "typer>=0.16,<1",
   "rich>=14,<15",
+  "prompt-toolkit>=3.0,<4",
   "PyYAML>=6.0.2,<7",
   "httpx>=0.28,<1",
   "Pillow>=11.3,<13",
+  "python-docx>=1.2,<2",
   "python-pptx>=1.0.2,<2",
   "PyMuPDF>=1.26,<2",
 ]
