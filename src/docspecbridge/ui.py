@@ -14,6 +14,10 @@ console = Console()
 
 _UP = "UP"
 _DOWN = "DOWN"
+_PAGE_UP = "PAGE_UP"
+_PAGE_DOWN = "PAGE_DOWN"
+_HOME = "HOME"
+_END = "END"
 _ENTER = "ENTER"
 _ESC = "ESC"
 
@@ -26,11 +30,14 @@ def _read_key() -> str:
         ch = msvcrt.getwch()
         if ch in ("\x00", "\xe0"):
             code = msvcrt.getwch()
-            if code == "H":
-                return _UP
-            if code == "P":
-                return _DOWN
-            return code
+            return {
+                "H": _UP,
+                "P": _DOWN,
+                "I": _PAGE_UP,
+                "Q": _PAGE_DOWN,
+                "G": _HOME,
+                "O": _END,
+            }.get(code, code)
         if ch == "\x1b":
             return _ESC
         if ch in ("\r", "\n"):
@@ -49,11 +56,10 @@ def _read_key() -> str:
             return _ENTER
         if ch != "\x1b":
             return ch
-        # Distinguish plain Esc from ANSI arrow sequences without blocking.
         if not select.select([sys.stdin], [], [], 0.05)[0]:
             return _ESC
         second = sys.stdin.read(1)
-        if second != "[":
+        if second not in {"[", "O"}:
             return _ESC
         if not select.select([sys.stdin], [], [], 0.05)[0]:
             return _ESC
@@ -62,9 +68,29 @@ def _read_key() -> str:
             return _UP
         if third == "B":
             return _DOWN
+        if third in {"H", "1"}:
+            if third == "1" and select.select([sys.stdin], [], [], 0.01)[0]:
+                sys.stdin.read(1)  # '~'
+            return _HOME
+        if third in {"F", "4"}:
+            if third == "4" and select.select([sys.stdin], [], [], 0.01)[0]:
+                sys.stdin.read(1)
+            return _END
+        if third in {"5", "6"}:
+            if select.select([sys.stdin], [], [], 0.01)[0]:
+                sys.stdin.read(1)  # '~'
+            return _PAGE_UP if third == "5" else _PAGE_DOWN
         return _ESC
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _truncate(value: str, width: int) -> str:
+    if width <= 1:
+        return value[:1]
+    if len(value) <= width:
+        return value
+    return value[: max(1, width - 1)] + "…"
 
 
 def select_option(
@@ -73,8 +99,15 @@ def select_option(
     *,
     default_index: int = 0,
     allow_escape: bool = True,
+    help_text: str | None = None,
 ) -> T | None:
-    """Arrow-key selector with numeric shortcuts and Esc cancellation."""
+    """Terminal-size-aware selector with a scrolling viewport.
+
+    The old selector rendered every option. On Windows terminals, once the selected
+    line moved below the visible console, Rich continued updating off-screen and the
+    cursor appeared to disappear. This renderer displays only the window that fits in
+    the current terminal and follows the selection dynamically.
+    """
     choices = list(options)
     if not choices:
         return None
@@ -93,38 +126,82 @@ def select_option(
             if raw.isdigit() and 1 <= int(raw) <= len(choices):
                 return choices[int(raw) - 1][0]
 
+    def viewport() -> tuple[int, int, int]:
+        # title + range + keyboard help + one safety line for terminals with a prompt
+        height = max(8, int(console.size.height or 24))
+        visible = max(3, height - 4)
+        visible = min(visible, len(choices))
+        start = max(0, min(index - visible // 2, len(choices) - visible))
+        return start, start + visible, visible
+
     def render() -> Group:
+        start, end, _ = viewport()
+        width = max(24, int(console.size.width or 80))
         lines: list[Text] = [Text(title, style="bold cyan")]
-        for idx, (_, label) in enumerate(choices):
+        lines.append(Text(f"{start + 1}-{end} / {len(choices)}", style="dim"))
+        index_width = len(str(len(choices)))
+        for idx in range(start, end):
+            _, label = choices[idx]
             marker = "❯" if idx == index else " "
-            text = Text(f"{marker} [{idx + 1}] {label}")
+            prefix = f"{marker} [{idx + 1:>{index_width}}] "
+            text = Text(prefix + _truncate(str(label), max(4, width - len(prefix) - 1)), no_wrap=True, overflow="ellipsis")
             if idx == index:
                 text.stylize("reverse")
             lines.append(text)
-        lines.append(Text("↑/↓  Enter  Esc" if allow_escape else "↑/↓  Enter", style="dim"))
+        default_help = "↑/↓  PgUp/PgDn  Home/End  Enter" + ("  Esc" if allow_escape else "")
+        lines.append(Text(help_text or default_help, style="dim", no_wrap=True, overflow="ellipsis"))
         return Group(*lines)
 
     selected: tuple[T, str] | None = None
-    with Live(render(), console=console, transient=True, auto_refresh=False) as live:
+    with Live(render(), console=console, transient=True, auto_refresh=False, vertical_overflow="crop") as live:
         while True:
             pressed = _read_key()
+            _, _, page_size = viewport()
             if pressed in (_UP, "k"):
                 index = (index - 1) % len(choices)
-                live.update(render(), refresh=True)
             elif pressed in (_DOWN, "j"):
                 index = (index + 1) % len(choices)
-                live.update(render(), refresh=True)
+            elif pressed == _PAGE_UP:
+                index = max(0, index - page_size)
+            elif pressed == _PAGE_DOWN:
+                index = min(len(choices) - 1, index + page_size)
+            elif pressed == _HOME:
+                index = 0
+            elif pressed == _END:
+                index = len(choices) - 1
             elif pressed == _ENTER:
                 selected = choices[index]
                 break
             elif allow_escape and pressed == _ESC:
                 return None
-            elif pressed.isdigit():
-                numeric = int(pressed)
-                if 1 <= numeric <= len(choices):
-                    selected = choices[numeric - 1]
-                    break
+            else:
+                # Retain the original one-digit shortcut behaviour for compatibility.
+                # Large lists are efficiently navigable with PgUp/PgDn/Home/End.
+                if len(pressed) == 1 and pressed.isdigit():
+                    numeric = int(pressed)
+                    if 1 <= numeric <= min(9, len(choices)):
+                        selected = choices[numeric - 1]
+                        break
+            live.update(render(), refresh=True)
 
     assert selected is not None
     console.print(f"[dim]{title}:[/dim] {selected[1]}")
     return selected[0]
+
+
+def edit_text(title: str, default: str = "") -> str:
+    """Edit a pre-filled value in-place.
+
+    prompt_toolkit gives Windows/Linux/macOS the same behaviour: the proposed value is
+    really present in the editing buffer, so Enter accepts it and normal cursor/edit keys
+    modify it directly. This is intentionally different from Rich's visual `(default)`.
+    """
+    try:
+        from prompt_toolkit import prompt
+
+        return prompt(f"{title}: ", default=str(default or "")).strip()
+    except Exception:
+        # Safe fallback for redirected/non-interactive terminals.
+        shown = str(default or "")
+        value = input(f"{title}: {shown}\n> ").strip()
+        return value or shown

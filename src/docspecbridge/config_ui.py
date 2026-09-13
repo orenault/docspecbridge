@@ -147,6 +147,56 @@ _FIELD_TEXT: dict[str, dict[str, str]] = {
     },
 }
 
+# 0.3 additions shared by the settings UI. Keeping them here (rather than hard-coded
+# prompts) ensures the selected application language is used for every interaction.
+_FIELD_TEXT["fr"].update({"page_depth": "Niveau de pages listable (0/1/2)", "page_width": "Largeur de page Confluence"})
+_FIELD_TEXT["en"].update({"page_depth": "Selectable page depth (0/1/2)", "page_width": "Confluence page width"})
+_FIELD_TEXT["de"].update({"page_depth": "Auflistbare Seitentiefe (0/1/2)", "page_width": "Confluence-Seitenbreite"})
+_FIELD_TEXT["es"].update({"page_depth": "Profundidad de páginas listables (0/1/2)", "page_width": "Ancho de página Confluence"})
+_FIELD_TEXT["zh"].update({"page_depth": "可列出的页面深度 (0/1/2)", "page_width": "Confluence 页面宽度"})
+
+# 0.4.2 publication policy/title settings.
+_FIELD_TEXT["fr"].update({
+    "publication_mode": "Mode de publication par défaut",
+    "title_source": "Nom de page Confluence",
+    "title_source_document": "Titre du document (fallback : nom du fichier)",
+    "title_source_filename": "Nom du fichier",
+    "verify_publish": "Vérifier la publication après envoi",
+    "add_suffix": "Suffixe automatique en mode Ajouter ({n} = compteur)",
+})
+_FIELD_TEXT["en"].update({
+    "publication_mode": "Default publication mode",
+    "title_source": "Confluence page name",
+    "title_source_document": "Document title (fallback: filename)",
+    "title_source_filename": "Filename",
+    "verify_publish": "Verify publication after upload",
+    "add_suffix": "Automatic suffix in Add mode ({n} = counter)",
+})
+_FIELD_TEXT["de"].update({
+    "publication_mode": "Standard-Veröffentlichungsmodus",
+    "title_source": "Confluence-Seitenname",
+    "title_source_document": "Dokumenttitel (Fallback: Dateiname)",
+    "title_source_filename": "Dateiname",
+    "verify_publish": "Veröffentlichung nach Upload prüfen",
+    "add_suffix": "Automatisches Suffix im Hinzufügen-Modus ({n} = Zähler)",
+})
+_FIELD_TEXT["es"].update({
+    "publication_mode": "Modo de publicación predeterminado",
+    "title_source": "Nombre de página Confluence",
+    "title_source_document": "Título del documento (fallback: nombre de archivo)",
+    "title_source_filename": "Nombre del archivo",
+    "verify_publish": "Verificar la publicación tras el envío",
+    "add_suffix": "Sufijo automático en modo Añadir ({n} = contador)",
+})
+_FIELD_TEXT["zh"].update({
+    "publication_mode": "默认发布模式",
+    "title_source": "Confluence 页面名称",
+    "title_source_document": "文档标题（回退：文件名）",
+    "title_source_filename": "文件名",
+    "verify_publish": "上传后验证发布结果",
+    "add_suffix": "添加模式自动后缀（{n} = 计数器）",
+})
+
 
 def _field(cfg: dict[str, Any], key: str) -> str:
     lang = config_language(cfg)
@@ -175,8 +225,8 @@ def _show_summary(cfg: dict[str, Any], path: Path) -> None:
     cf = cfg["confluence"]
 
     table = Table(title=f"{tr(cfg, 'settings.summary')} - {path}")
-    table.add_column("Paramètre")
-    table.add_column("Valeur")
+    table.add_column(tr(cfg, "common.parameter"))
+    table.add_column(tr(cfg, "common.value"))
     table.add_row("language", f"{app.get('language')} - {SUPPORTED_LANGUAGES.get(config_language(cfg), '')}")
     source = Path(str(app.get("source")))
     dest = Path(str(app.get("destination")))
@@ -195,20 +245,25 @@ def _show_summary(cfg: dict[str, Any], path: Path) -> None:
     table.add_row("confluence.default_instance", str(cf.get("default_instance") or tr(cfg, "common.none")))
     table.add_row("confluence.keep_hierarchy", str(bool(cf.get("keep_hierarchy", False))))
     table.add_row("confluence.heading_anchors", str(bool(cf.get("heading_anchors", True))))
-    table.add_row("confluence.write_page_id", str(bool(cf.get("write_page_id_to_markdown", True))))
+    publication_policy = cf.get("publication") or {}
+    table.add_row("confluence.publication.mode", str(publication_policy.get("default_mode") or "replace"))
+    table.add_row("confluence.publication.title_source", str(publication_policy.get("page_title_source") or "document_title"))
+    table.add_row("confluence.publication.verify", str(bool(publication_policy.get("verify_after_publish", True))))
     table.add_row("confluence.comments", str(cf.get("comments") or "remove"))
+    table.add_row("confluence.page_width", str(cf.get("page_width") or "max"))
+    table.add_row("confluence.page_selector.max_depth", str((cf.get("page_selector") or {}).get("max_depth", 0)))
     console.print(table)
 
     instances = confluence_instances(cfg)
     instance_table = Table(title="Confluence Cloud")
-    instance_table.add_column("Nom")
-    instance_table.add_column("Défaut")
+    instance_table.add_column(tr(cfg, "common.name"))
+    instance_table.add_column(tr(cfg, "common.default"))
     instance_table.add_column("Auth")
-    instance_table.add_column("Domaine")
-    instance_table.add_column("Utilisateur")
+    instance_table.add_column(tr(cfg, "common.domain"))
+    instance_table.add_column(tr(cfg, "common.user"))
     instance_table.add_column("Token env")
-    instance_table.add_column("Espace")
-    instance_table.add_column("Page racine")
+    instance_table.add_column(tr(cfg, "common.space"))
+    instance_table.add_column(tr(cfg, "common.root_page"))
     for name, item in instances.items():
         instance_table.add_row(
             name,
@@ -246,7 +301,7 @@ def _edit_app(cfg: dict[str, Any]) -> bool:
     app = cfg["app"]
     app["source"] = _edit_text(cfg, _field(cfg, "source"), str(app.get("source") or "./input"), allow_clear=False)
     app["destination"] = _edit_text(cfg, _field(cfg, "destination"), str(app.get("destination") or "./output"), allow_clear=False)
-    ext_default = ",".join(app.get("extensions") or [".docx", ".pdf", ".pptx"])
+    ext_default = ",".join(app.get("extensions") or [".docx", ".pdf", ".pptx", ".html", ".htm", ".md"])
     extensions = _edit_text(cfg, _field(cfg, "extensions"), ext_default, allow_clear=False)
     app["extensions"] = [
         e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
@@ -314,7 +369,10 @@ def _list_instances(cfg: dict[str, Any]) -> None:
     instances = confluence_instances(cfg)
     default_name = str((cfg.get("confluence") or {}).get("default_instance") or "")
     table = Table(title="Confluence Cloud")
-    for col in ("Nom", "Défaut", "Auth", "Domaine", "Utilisateur", "Token env", "Cloud ID", "Espace", "Page racine"):
+    for col in (
+        tr(cfg, "common.name"), tr(cfg, "common.default"), "Auth", tr(cfg, "common.domain"),
+        tr(cfg, "common.user"), "Token env", "Cloud ID", tr(cfg, "common.space"), tr(cfg, "common.root_page")
+    ):
         table.add_column(col)
     for name, item in instances.items():
         table.add_row(
@@ -334,7 +392,7 @@ def _list_instances(cfg: dict[str, Any]) -> None:
 def _select_instance_name(cfg: dict[str, Any], title: str) -> str | None:
     names = list(confluence_instances(cfg))
     if not names:
-        console.print("[yellow]Aucune instance Confluence configurée.[/yellow]")
+        console.print(f"[yellow]{tr(cfg, 'instances.none')}[/yellow]")
         return None
     default_name = str((cfg.get("confluence") or {}).get("default_instance") or names[0])
     default_idx = names.index(default_name) if default_name in names else 0
@@ -374,7 +432,7 @@ def _add_instance(cfg: dict[str, Any]) -> bool:
     if not name:
         return False
     if name in instances:
-        console.print(f"[red]L'instance '{name}' existe déjà. Utiliser Modifier.[/red]")
+        console.print(f"[red]{tr(cfg, 'instances.exists', name=name)}[/red]")
         return False
     item = _edit_auth_fields(cfg, {})
     instances[name] = item
@@ -394,7 +452,7 @@ def _modify_instance(cfg: dict[str, Any]) -> bool:
     if not new_name:
         new_name = old_name
     if new_name != old_name and new_name in instances:
-        console.print(f"[red]L'instance '{new_name}' existe déjà.[/red]")
+        console.print(f"[red]{tr(cfg, 'instances.exists', name=new_name)}[/red]")
         return False
     current = _edit_auth_fields(cfg, current)
     if new_name != old_name:
@@ -431,7 +489,7 @@ def _delete_instance(cfg: dict[str, Any]) -> bool:
 def choose_space_root(cfg: dict[str, Any], instance_name: str, *, set_default: bool = True) -> bool:
     spaces = list_spaces(cfg, instance_name)
     if not spaces:
-        console.print("[yellow]Aucun espace accessible.[/yellow]")
+        console.print(f"[yellow]{tr(cfg, 'spaces.none')}[/yellow]")
         return False
     selected_space_id = select_option(
         _field(cfg, "select_space"),
@@ -443,22 +501,35 @@ def choose_space_root(cfg: dict[str, Any], instance_name: str, *, set_default: b
     if selected_space_id is None:
         return False
     selected_space = next(space for space in spaces if str(space.get("id", "")) == selected_space_id)
-    pages = list_root_pages(cfg, instance_name, selected_space_id)
-    table = Table(title=f"Pages racines - {selected_space.get('key', '')}")
-    table.add_column("#")
-    table.add_column("Titre")
-    table.add_column("ID")
-    for idx, page in enumerate(pages, 1):
-        table.add_row(str(idx), str(page.get("title", "")), str(page.get("id", "")))
-    console.print(table)
-    if not pages or not set_default:
+    max_depth = int(((cfg.get("confluence") or {}).get("page_selector") or {}).get("max_depth", 0))
+    pages = list_root_pages(cfg, instance_name, selected_space_id, max_depth=max_depth)
+    if not pages:
+        console.print(f"[yellow]{tr(cfg, 'confluence.no_pages')}[/yellow]")
+        return False
+    if not set_default:
+        table = Table(title=tr(cfg, "confluence.pages_title", space=selected_space.get("key", ""), depth=max_depth))
+        table.add_column("#")
+        table.add_column(tr(cfg, "common.title"))
+        table.add_column(tr(cfg, "common.level"))
+        table.add_column("ID")
+        for idx, page in enumerate(pages, 1):
+            table.add_row(
+                str(idx),
+                str(page.get("tree_label") or page.get("title", "")),
+                str(page.get("level", page.get("depth", 0))),
+                str(page.get("id", "")),
+            )
+        console.print(table)
         return False
     confirm = _confirm(cfg, _field(cfg, "set_root"), False)
     if confirm is not True:
         return False
     selected_page_id = select_option(
         _field(cfg, "select_page"),
-        [(str(page.get("id", "")), f"{page.get('title', '')} (ID {page.get('id', '')})") for page in pages],
+        [(
+            str(page.get("id", "")),
+            f"{page.get('tree_label') or page.get('title', '')} (ID {page.get('id', '')})",
+        ) for page in pages],
     )
     if selected_page_id is None:
         return False
@@ -504,15 +575,70 @@ def _instances_menu(cfg: dict[str, Any]) -> bool:
 def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
     cf = cfg.setdefault("confluence", {})
     layout = cf.setdefault("layout", {})
+    selector = cf.setdefault("page_selector", {})
+    publication = cf.setdefault("publication", {})
+
+    modes = ["replace", "add"]
+    current_publication_mode = str(publication.get("default_mode") or "replace")
+    selected_mode = select_option(
+        _field(cfg, "publication_mode"),
+        [("replace", "replace"), ("add", "add")],
+        default_index=modes.index(current_publication_mode) if current_publication_mode in modes else 0,
+    )
+    if selected_mode is not None:
+        publication["default_mode"] = selected_mode
+
+    title_sources = ["document_title", "filename"]
+    current_title_source = str(publication.get("page_title_source") or "document_title")
+    selected_title_source = select_option(
+        _field(cfg, "title_source"),
+        [
+            ("document_title", _field(cfg, "title_source_document")),
+            ("filename", _field(cfg, "title_source_filename")),
+        ],
+        default_index=title_sources.index(current_title_source) if current_title_source in title_sources else 0,
+    )
+    if selected_title_source is not None:
+        publication["page_title_source"] = selected_title_source
+
+    publication["add_title_suffix"] = _edit_text(
+        cfg, _field(cfg, "add_suffix"), str(publication.get("add_title_suffix") or " ({n})"), allow_clear=False
+    )
+    verify = _confirm(cfg, _field(cfg, "verify_publish"), bool(publication.get("verify_after_publish", True)))
+    if verify is not None:
+        publication["verify_after_publish"] = verify
+
+    depths = [0, 1, 2]
+    current_depth = max(0, min(2, int(selector.get("max_depth", 0))))
+    depth = select_option(
+        _field(cfg, "page_depth"),
+        [(value, str(value)) for value in depths],
+        default_index=current_depth,
+    )
+    if depth is not None:
+        selector["max_depth"] = int(depth)
+
+    widths = ["narrow", "wide", "max", "confluence-default"]
+    current_width = str(cf.get("page_width") or "max")
+    width_labels = {
+        "narrow": tr(cfg, "page_width.narrow"),
+        "wide": tr(cfg, "page_width.wide"),
+        "max": tr(cfg, "page_width.max"),
+        "confluence-default": tr(cfg, "page_width.default"),
+    }
+    width = select_option(
+        _field(cfg, "page_width"),
+        [(value, width_labels[value]) for value in widths],
+        default_index=widths.index(current_width) if current_width in widths else 2,
+    )
+    if width is not None:
+        cf["page_width"] = width
     value = _confirm(cfg, _field(cfg, "keep_hierarchy"), bool(cf.get("keep_hierarchy", False)))
     if value is not None:
         cf["keep_hierarchy"] = value
     value = _confirm(cfg, _field(cfg, "overwrite_manual"), bool(cf.get("overwrite_manual_changes", False)))
     if value is not None:
         cf["overwrite_manual_changes"] = value
-    value = _confirm(cfg, _field(cfg, "page_id"), bool(cf.get("write_page_id_to_markdown", True)))
-    if value is not None:
-        cf["write_page_id_to_markdown"] = value
     value = _confirm(cfg, _field(cfg, "heading_anchors"), bool(cf.get("heading_anchors", True)))
     if value is not None:
         cf["heading_anchors"] = value
@@ -552,8 +678,8 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
 
 def _show_doctor(cfg: dict[str, Any], config_path: Path) -> None:
     table = Table(title="DocSpecBridge doctor")
-    table.add_column("Elément")
-    table.add_column("Valeur")
+    table.add_column(tr(cfg, "doctor.element"))
+    table.add_column(tr(cfg, "doctor.value"))
     for key, value in doctor_info(cfg, config_path=config_path).items():
         table.add_row(key, value)
     console.print(table)

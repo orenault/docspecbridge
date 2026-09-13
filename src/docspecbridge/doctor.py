@@ -35,6 +35,8 @@ def doctor_info(config: dict[str, Any], *, config_path: Path | None = None) -> d
         "Platform": platform.platform(),
         "xberg": package_version("xberg"),
         "markdown-to-confluence": package_version("markdown-to-confluence"),
+        "Mammoth": package_version("mammoth"),
+        "lxml": package_version("lxml"),
         "python-pptx": package_version("python-pptx"),
         "PyMuPDF": package_version("PyMuPDF"),
         "Pillow": package_version("Pillow"),
