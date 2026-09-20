@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
-from rich.prompt import Prompt
 from rich.table import Table
 
 from .config import (
@@ -18,9 +17,10 @@ from .config import (
     selected_config_path,
 )
 from .confluence import list_root_pages, list_spaces
+from .jira import jira_instances, list_issue_types, list_projects
 from .doctor import doctor_info
 from .i18n import SUPPORTED_LANGUAGES, config_language, tr
-from .ui import select_option
+from .ui import UserCancelled, prompt_text, select_option
 
 console = Console()
 
@@ -28,7 +28,6 @@ _FIELD_TEXT: dict[str, dict[str, str]] = {
     "fr": {
         "source": "Source par défaut",
         "destination": "Destination par défaut",
-        "extensions": "Extensions (séparées par des virgules)",
         "recursive": "Recherche récursive",
         "tree": "Conserver l'arborescence source",
         "copy": "Copier le fichier source dans le package",
@@ -71,7 +70,6 @@ _FIELD_TEXT: dict[str, dict[str, str]] = {
     "en": {
         "source": "Default source",
         "destination": "Default destination",
-        "extensions": "Extensions (comma-separated)",
         "recursive": "Recursive search",
         "tree": "Preserve source directory tree",
         "copy": "Copy source file into package",
@@ -112,7 +110,7 @@ _FIELD_TEXT: dict[str, dict[str, str]] = {
         "table_width": "Maximum table width (px, - for none)",
     },
     "de": {
-        "source": "Standardquelle", "destination": "Standardziel", "extensions": "Erweiterungen (kommagetrennt)",
+        "source": "Standardquelle", "destination": "Standardziel",
         "recursive": "Rekursive Suche", "tree": "Quellstruktur beibehalten", "copy": "Quelldatei in Paket kopieren",
         "pub": "Veröffentlichungs-Markdown erzeugen", "image_size": "Bildanzeigegröße beibehalten", "rag": "RAG-Profil erzeugen",
         "rag_images": "Bildreferenzen in rag.md behalten", "header_images": "Kopfbilder in rag.md behalten", "chunks": "chunks.jsonl erzeugen",
@@ -124,7 +122,7 @@ _FIELD_TEXT: dict[str, dict[str, str]] = {
         "delete_confirm": "Löschen bestätigen", "set_root": "Seite als Standard-Importwurzel festlegen?", "select_space": "Bereich wählen", "select_page": "Stammseite wählen",
     },
     "es": {
-        "source": "Origen predeterminado", "destination": "Destino predeterminado", "extensions": "Extensiones (separadas por comas)",
+        "source": "Origen predeterminado", "destination": "Destino predeterminado",
         "recursive": "Búsqueda recursiva", "tree": "Conservar árbol de origen", "copy": "Copiar archivo fuente al paquete",
         "pub": "Generar Markdown de publicación", "image_size": "Conservar tamaño de visualización de imágenes", "rag": "Generar perfil RAG",
         "rag_images": "Conservar referencias de imágenes en rag.md", "header_images": "Conservar imágenes de cabecera en rag.md", "chunks": "Generar chunks.jsonl",
@@ -136,7 +134,7 @@ _FIELD_TEXT: dict[str, dict[str, str]] = {
         "delete_confirm": "Confirmar eliminación", "set_root": "¿Definir una página como raíz predeterminada de importación?", "select_space": "Elegir espacio", "select_page": "Elegir página raíz",
     },
     "zh": {
-        "source": "默认源目录", "destination": "默认目标目录", "extensions": "扩展名（逗号分隔）", "recursive": "递归搜索",
+        "source": "默认源目录", "destination": "默认目标目录", "recursive": "递归搜索",
         "tree": "保留源目录结构", "copy": "将源文件复制到包中", "pub": "生成发布 Markdown", "image_size": "保留图片显示尺寸",
         "rag": "生成 RAG 配置", "rag_images": "在 rag.md 中保留图片引用", "header_images": "在 rag.md 中保留页眉图片", "chunks": "生成 chunks.jsonl",
         "chunk_size": "最大块大小（字符）", "overlap": "重叠（字符）", "raw": "保留 Xberg 原始 Markdown（诊断）", "toc": "将检测到的目录替换为 Confluence 原生目录", "rag_export_destination": "RAG 语料目标目录",
@@ -203,15 +201,22 @@ def _field(cfg: dict[str, Any], key: str) -> str:
     return _FIELD_TEXT.get(lang, _FIELD_TEXT["en"]).get(key, _FIELD_TEXT["en"].get(key, key))
 
 
-def _confirm(cfg: dict[str, Any], label: str, default: bool = True) -> bool | None:
+def _select_action(title: str, options, *, default_index: int = 0):
+    value = select_option(title, options, default_index=default_index)
+    if value is None:
+        raise UserCancelled()
+    return value
+
+
+def _confirm(cfg: dict[str, Any], label: str, default: bool = True) -> bool:
     options = [(True, tr(cfg, "common.yes")), (False, tr(cfg, "common.no"))]
-    return select_option(label, options, default_index=0 if default else 1)
+    return bool(_select_action(label, options, default_index=0 if default else 1))
 
 
 def _edit_text(cfg: dict[str, Any], label: str, current: str = "", *, allow_clear: bool = True) -> str:
     hint = tr(cfg, "common.keep_clear_hint") if allow_clear else ""
     prompt = f"{label} [{hint}]" if hint else label
-    value = Prompt.ask(prompt, default=current).strip()
+    value = prompt_text(prompt, current).strip()
     if allow_clear and value == "-":
         return ""
     return value
@@ -232,7 +237,6 @@ def _show_summary(cfg: dict[str, Any], path: Path) -> None:
     dest = Path(str(app.get("destination")))
     table.add_row("source", f"{source} ({'OK' if source.exists() else 'absent'})")
     table.add_row("destination", f"{dest} ({'OK' if dest.exists() else 'absent'})")
-    table.add_row("extensions", ", ".join(app.get("extensions") or []))
     table.add_row("recursive", str(bool(app.get("recursive"))))
     table.add_row("publication", str(bool(pub.get("enabled"))))
     table.add_row("publication.image_display_size", str(bool(pub.get("preserve_image_display_size"))))
@@ -285,13 +289,11 @@ def _edit_language(cfg: dict[str, Any]) -> bool:
     current = config_language(cfg)
     codes = list(SUPPORTED_LANGUAGES)
     default_idx = codes.index(current) if current in codes else 0
-    selected = select_option(
+    selected = _select_action(
         tr(cfg, "settings.language"),
         [(code, f"{label} ({code.upper()})") for code, label in SUPPORTED_LANGUAGES.items()],
         default_index=default_idx,
     )
-    if selected is None:
-        return False
     cfg["app"]["language"] = selected
     console.print(f"[green]{tr(cfg, 'settings.language_saved', language=SUPPORTED_LANGUAGES[selected])}[/green]")
     return True
@@ -301,12 +303,6 @@ def _edit_app(cfg: dict[str, Any]) -> bool:
     app = cfg["app"]
     app["source"] = _edit_text(cfg, _field(cfg, "source"), str(app.get("source") or "./input"), allow_clear=False)
     app["destination"] = _edit_text(cfg, _field(cfg, "destination"), str(app.get("destination") or "./output"), allow_clear=False)
-    ext_default = ",".join(app.get("extensions") or [".docx", ".pdf", ".pptx", ".html", ".htm", ".md"])
-    extensions = _edit_text(cfg, _field(cfg, "extensions"), ext_default, allow_clear=False)
-    app["extensions"] = [
-        e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
-        for e in extensions.split(",") if e.strip()
-    ]
     recursive = _confirm(cfg, _field(cfg, "recursive"), bool(app.get("recursive", True)))
     if recursive is None:
         return True
@@ -352,8 +348,8 @@ def _edit_profiles(cfg: dict[str, Any]) -> bool:
     if value is not None:
         chunking["enabled"] = value
     if chunking.get("enabled", True):
-        chunking["max_characters"] = int(Prompt.ask(_field(cfg, "chunk_size"), default=str(chunking.get("max_characters", 1600))))
-        chunking["overlap"] = int(Prompt.ask(_field(cfg, "overlap"), default=str(chunking.get("overlap", 150))))
+        chunking["max_characters"] = int(prompt_text(_field(cfg, "chunk_size"), str(chunking.get("max_characters", 1600))))
+        chunking["overlap"] = int(prompt_text(_field(cfg, "overlap"), str(chunking.get("overlap", 150))))
     value = _confirm(cfg, _field(cfg, "raw"), bool(extract_diag.get("keep_raw_xberg_markdown", False)))
     if value is not None:
         extract_diag["keep_raw_xberg_markdown"] = value
@@ -401,13 +397,12 @@ def _select_instance_name(cfg: dict[str, Any], title: str) -> str | None:
 
 def _edit_auth_fields(cfg: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
     auth_current = str(item.get("auth_type") or "classic")
-    auth = select_option(
+    auth = _select_action(
         _field(cfg, "auth"),
         [("classic", _field(cfg, "classic")), ("scoped", _field(cfg, "scoped"))],
         default_index=1 if auth_current == "scoped" else 0,
     )
-    if auth is not None:
-        item["auth_type"] = auth
+    item["auth_type"] = auth
     item["domain"] = normalize_domain(_edit_text(cfg, _field(cfg, "domain"), str(item.get("domain") or ""), allow_clear=True))
     item["user_name"] = _edit_text(cfg, _field(cfg, "email"), str(item.get("user_name") or ""), allow_clear=True)
     item["token_env"] = _edit_text(cfg, _field(cfg, "token_env"), str(item.get("token_env") or "ATLASSIAN_API_TOKEN"), allow_clear=False)
@@ -428,7 +423,7 @@ def _add_instance(cfg: dict[str, Any]) -> bool:
     cf = cfg.setdefault("confluence", {})
     instances = cf.setdefault("instances", {})
     suggested = "production" if "production" not in instances else "confluence"
-    name = Prompt.ask(_field(cfg, "instance_name"), default=suggested).strip()
+    name = prompt_text(_field(cfg, "instance_name"), suggested).strip()
     if not name:
         return False
     if name in instances:
@@ -491,15 +486,19 @@ def choose_space_root(cfg: dict[str, Any], instance_name: str, *, set_default: b
     if not spaces:
         console.print(f"[yellow]{tr(cfg, 'spaces.none')}[/yellow]")
         return False
-    selected_space_id = select_option(
+    item = cfg.setdefault("confluence", {}).setdefault("instances", {}).get(instance_name) or {}
+    default_space = str(item.get("default_space") or "")
+    if default_space:
+        console.print(f"[dim]{tr(cfg, 'confluence.current_default', value=default_space)}[/dim]")
+    default_space_idx = next((idx for idx, space in enumerate(spaces) if str(space.get("key") or "") == default_space), 0)
+    selected_space_id = _select_action(
         _field(cfg, "select_space"),
         [
             (str(space.get("id", "")), f"{space.get('key', '')} - {space.get('name', '')} (ID {space.get('id', '')})")
             for space in spaces
         ],
+        default_index=default_space_idx,
     )
-    if selected_space_id is None:
-        return False
     selected_space = next(space for space in spaces if str(space.get("id", "")) == selected_space_id)
     max_depth = int(((cfg.get("confluence") or {}).get("page_selector") or {}).get("max_depth", 0))
     pages = list_root_pages(cfg, instance_name, selected_space_id, max_depth=max_depth)
@@ -521,23 +520,30 @@ def choose_space_root(cfg: dict[str, Any], instance_name: str, *, set_default: b
             )
         console.print(table)
         return False
-    confirm = _confirm(cfg, _field(cfg, "set_root"), False)
-    if confirm is not True:
-        return False
-    selected_page_id = select_option(
+
+    same_space = str(selected_space.get("key") or "") == default_space
+    default_page = str(item.get("root_page") or "") if same_space else ""
+    default_page = default_page or str(selected_space.get("homepageId") or "")
+    if default_page:
+        default_obj = next((page for page in pages if str(page.get("id") or "") == default_page), None)
+        default_label = str((default_obj or {}).get("tree_label") or (default_obj or {}).get("title") or default_page)
+        console.print(f"[dim]{tr(cfg, 'confluence.current_default', value=default_label)}[/dim]")
+    default_page_idx = next((idx for idx, page in enumerate(pages) if str(page.get("id") or "") == default_page), 0)
+    selected_page_id = _select_action(
         _field(cfg, "select_page"),
         [(
             str(page.get("id", "")),
             f"{page.get('tree_label') or page.get('title', '')} (ID {page.get('id', '')})",
         ) for page in pages],
+        default_index=default_page_idx,
     )
-    if selected_page_id is None:
+    confirm = _confirm(cfg, _field(cfg, "set_root"), True)
+    if confirm is not True:
         return False
-    item = cfg["confluence"]["instances"][instance_name]
-    item["default_space"] = str(selected_space.get("key", ""))
-    item["root_page"] = selected_page_id
+    target = cfg["confluence"]["instances"][instance_name]
+    target["default_space"] = str(selected_space.get("key", ""))
+    target["root_page"] = selected_page_id
     return True
-
 
 def _instances_menu(cfg: dict[str, Any]) -> bool:
     dirty = False
@@ -572,6 +578,219 @@ def _instances_menu(cfg: dict[str, Any]) -> bool:
                 dirty = choose_space_root(cfg, name, set_default=True) or dirty
 
 
+
+def _jira_defaults(cfg: dict[str, Any], instance_name: str) -> dict[str, Any]:
+    jira = cfg.setdefault("jira", {})
+    defaults = jira.setdefault("defaults", {})
+    value = defaults.setdefault(instance_name, {})
+    if not isinstance(value, dict):
+        value = {}
+        defaults[instance_name] = value
+    return value
+
+
+def _select_jira_instance_name(cfg: dict[str, Any], title: str) -> str | None:
+    names = list(jira_instances(cfg))
+    if not names:
+        console.print(f"[yellow]{tr(cfg, 'jira.no_instance')}[/yellow]")
+        return None
+    configured = str((cfg.get("jira") or {}).get("default_instance") or "")
+    inherited_default = str((cfg.get("confluence") or {}).get("default_instance") or "")
+    default_name = configured or inherited_default or names[0]
+    default_idx = names.index(default_name) if default_name in names else 0
+    return select_option(title, [(name, name) for name in names], default_index=default_idx)
+
+
+def _list_jira_settings(cfg: dict[str, Any]) -> None:
+    effective = jira_instances(cfg)
+    explicit = (cfg.get("jira") or {}).get("instances") or {}
+    default_name = str((cfg.get("jira") or {}).get("default_instance") or (cfg.get("confluence") or {}).get("default_instance") or "")
+    table = Table(title=tr(cfg, "jira.settings.summary"))
+    table.add_column(tr(cfg, "common.name"))
+    table.add_column(tr(cfg, "common.default"))
+    table.add_column("Source")
+    table.add_column(tr(cfg, "common.domain"))
+    table.add_column(tr(cfg, "common.user"))
+    table.add_column(tr(cfg, "interactive.project_select"))
+    table.add_column(tr(cfg, "interactive.issue_type_select"))
+    for name, item in effective.items():
+        defaults = _jira_defaults(cfg, name)
+        source = "Jira" if name in explicit else tr(cfg, "jira.settings.inherited")
+        table.add_row(
+            name,
+            "*" if name == default_name else "",
+            source,
+            str(item.get("domain") or ""),
+            str(item.get("user_name") or ""),
+            str(defaults.get("project") or ""),
+            str(defaults.get("issue_type") or ""),
+        )
+    console.print(table)
+
+
+def _edit_jira_auth_fields(cfg: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    item["domain"] = normalize_domain(_edit_text(cfg, _field(cfg, "domain"), str(item.get("domain") or ""), allow_clear=True))
+    item["user_name"] = _edit_text(cfg, _field(cfg, "email"), str(item.get("user_name") or ""), allow_clear=True)
+    item["token_env"] = _edit_text(cfg, _field(cfg, "token_env"), str(item.get("token_env") or "ATLASSIAN_API_TOKEN"), allow_clear=False)
+    item["auth_type"] = "classic"
+    return item
+
+
+def _add_jira_instance(cfg: dict[str, Any]) -> bool:
+    jira = cfg.setdefault("jira", {})
+    explicit = jira.setdefault("instances", {})
+    effective = jira_instances(cfg)
+    suggested = "production" if "production" not in effective else "jira"
+    name = prompt_text(_field(cfg, "instance_name"), suggested).strip()
+    if not name:
+        return False
+    if name in explicit:
+        console.print(f"[red]{tr(cfg, 'instances.exists', name=name)}[/red]")
+        return False
+    base = dict(effective.get(name) or {})
+    explicit[name] = _edit_jira_auth_fields(cfg, base)
+    if not jira.get("default_instance"):
+        jira["default_instance"] = name
+    return True
+
+
+def _modify_jira_instance(cfg: dict[str, Any]) -> bool:
+    name = _select_jira_instance_name(cfg, tr(cfg, "instances.modify"))
+    if not name:
+        return False
+    jira = cfg.setdefault("jira", {})
+    explicit = jira.setdefault("instances", {})
+    current = dict(jira_instances(cfg).get(name) or {})
+    explicit[name] = _edit_jira_auth_fields(cfg, current)
+    return True
+
+
+def _delete_jira_instance(cfg: dict[str, Any]) -> bool:
+    name = _select_jira_instance_name(cfg, tr(cfg, "instances.delete"))
+    if not name:
+        return False
+    jira = cfg.setdefault("jira", {})
+    explicit = jira.setdefault("instances", {})
+    if name not in explicit:
+        console.print(f"[yellow]{tr(cfg, 'jira.settings.inherited')}[/yellow]")
+        return False
+    confirm = _confirm(cfg, f"{_field(cfg, 'delete_confirm')} : {name}", False)
+    if confirm is not True:
+        return False
+    explicit.pop(name, None)
+    if jira.get("default_instance") == name and name not in jira_instances(cfg):
+        jira["default_instance"] = next(iter(jira_instances(cfg)), "")
+    return True
+
+
+def _set_jira_default_instance(cfg: dict[str, Any]) -> bool:
+    name = _select_jira_instance_name(cfg, tr(cfg, "jira.settings.default_instance"))
+    if not name:
+        return False
+    cfg.setdefault("jira", {})["default_instance"] = name
+    return True
+
+
+def _set_jira_default_project(cfg: dict[str, Any]) -> bool:
+    name = _select_jira_instance_name(cfg, tr(cfg, "jira.settings.default_project"))
+    if not name:
+        return False
+    projects = list_projects(cfg, name)
+    if not projects:
+        console.print(f"[yellow]{tr(cfg, 'jira.no_project')}[/yellow]")
+        return False
+    defaults = _jira_defaults(cfg, name)
+    current = str(defaults.get("project") or "")
+    if current:
+        console.print(f"[dim]{tr(cfg, 'jira.current_default', value=current)}[/dim]")
+    default_idx = next((idx for idx, row in enumerate(projects) if str(row.get("key") or row.get("id") or "") == current), 0)
+    project = _select_action(
+        tr(cfg, "interactive.project_select"),
+        [(str(row.get("key") or row.get("id") or ""), f"{row.get('key', '')} — {row.get('name', '')}") for row in projects],
+        default_index=default_idx,
+    )
+    defaults["project"] = str(project)
+    # Issue types are project-scoped; clear a stale type when the project changes.
+    if str(project) != current:
+        defaults["issue_type"] = ""
+    console.print(f"[green]{tr(cfg, 'jira.settings.saved_project', project=project)}[/green]")
+    return True
+
+
+def _set_jira_default_issue_type(cfg: dict[str, Any]) -> bool:
+    name = _select_jira_instance_name(cfg, tr(cfg, "jira.settings.default_issue_type"))
+    if not name:
+        return False
+    defaults = _jira_defaults(cfg, name)
+    project = str(defaults.get("project") or "")
+    if not project:
+        projects = list_projects(cfg, name)
+        if not projects:
+            console.print(f"[yellow]{tr(cfg, 'jira.no_project')}[/yellow]")
+            return False
+        project = str(_select_action(
+            tr(cfg, "interactive.project_select"),
+            [(str(row.get("key") or row.get("id") or ""), f"{row.get('key', '')} — {row.get('name', '')}") for row in projects],
+            default_index=0,
+        ))
+        defaults["project"] = project
+    types = list_issue_types(cfg, project, name)
+    if not types:
+        console.print(f"[yellow]{tr(cfg, 'jira.no_issue_type', project=project)}[/yellow]")
+        return False
+    current = str(defaults.get("issue_type") or "")
+    default_idx = next((idx for idx, row in enumerate(types) if str(row.get("name") or row.get("id") or "") == current), 0)
+    issue_type = _select_action(
+        tr(cfg, "interactive.issue_type_select"),
+        [(str(row.get("name") or row.get("id") or ""), str(row.get("name") or row.get("id") or "")) for row in types],
+        default_index=default_idx,
+    )
+    defaults["issue_type"] = str(issue_type)
+    console.print(f"[green]{tr(cfg, 'jira.settings.saved_issue_type', issue_type=issue_type)}[/green]")
+    return True
+
+
+def _jira_settings_menu(cfg: dict[str, Any]) -> bool:
+    dirty = False
+    while True:
+        snapshot = deepcopy(cfg)
+        choice = select_option(
+            tr(cfg, "jira.settings"),
+            [
+                ("summary", tr(cfg, "jira.settings.summary")),
+                ("add", tr(cfg, "instances.add")),
+                ("modify", tr(cfg, "instances.modify")),
+                ("delete", tr(cfg, "instances.delete")),
+                ("default_instance", tr(cfg, "jira.settings.default_instance")),
+                ("default_project", tr(cfg, "jira.settings.default_project")),
+                ("default_issue_type", tr(cfg, "jira.settings.default_issue_type")),
+                ("back", tr(cfg, "common.back")),
+            ],
+        )
+        if choice in (None, "back"):
+            return dirty
+        try:
+            changed = False
+            if choice == "summary":
+                _list_jira_settings(cfg)
+            elif choice == "add":
+                changed = _add_jira_instance(cfg)
+            elif choice == "modify":
+                changed = _modify_jira_instance(cfg)
+            elif choice == "delete":
+                changed = _delete_jira_instance(cfg)
+            elif choice == "default_instance":
+                changed = _set_jira_default_instance(cfg)
+            elif choice == "default_project":
+                changed = _set_jira_default_project(cfg)
+            elif choice == "default_issue_type":
+                changed = _set_jira_default_issue_type(cfg)
+            dirty = changed or dirty
+        except UserCancelled:
+            cfg.clear()
+            cfg.update(snapshot)
+            console.print(f"[dim]{tr(cfg, 'interactive.cancelled')}[/dim]")
+
 def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
     cf = cfg.setdefault("confluence", {})
     layout = cf.setdefault("layout", {})
@@ -580,7 +799,7 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
 
     modes = ["replace", "add"]
     current_publication_mode = str(publication.get("default_mode") or "replace")
-    selected_mode = select_option(
+    selected_mode = _select_action(
         _field(cfg, "publication_mode"),
         [("replace", "replace"), ("add", "add")],
         default_index=modes.index(current_publication_mode) if current_publication_mode in modes else 0,
@@ -590,7 +809,7 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
 
     title_sources = ["document_title", "filename"]
     current_title_source = str(publication.get("page_title_source") or "document_title")
-    selected_title_source = select_option(
+    selected_title_source = _select_action(
         _field(cfg, "title_source"),
         [
             ("document_title", _field(cfg, "title_source_document")),
@@ -610,7 +829,7 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
 
     depths = [0, 1, 2]
     current_depth = max(0, min(2, int(selector.get("max_depth", 0))))
-    depth = select_option(
+    depth = _select_action(
         _field(cfg, "page_depth"),
         [(value, str(value)) for value in depths],
         default_index=current_depth,
@@ -626,7 +845,7 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
         "max": tr(cfg, "page_width.max"),
         "confluence-default": tr(cfg, "page_width.default"),
     }
-    width = select_option(
+    width = _select_action(
         _field(cfg, "page_width"),
         [(value, width_labels[value]) for value in widths],
         default_index=widths.index(current_width) if current_width in widths else 2,
@@ -643,7 +862,7 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
     if value is not None:
         cf["heading_anchors"] = value
 
-    comments = select_option(
+    comments = _select_action(
         _field(cfg, "comments"),
         [("remove", "remove"), ("check-open", "check-open")],
         default_index=1 if str(cf.get("comments") or "remove") == "check-open" else 0,
@@ -653,7 +872,7 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
 
     alignment_values = ["center", "left", "right"]
     current_alignment = str(layout.get("alignment") or "center")
-    alignment = select_option(
+    alignment = _select_action(
         _field(cfg, "alignment"),
         [(value, value) for value in alignment_values],
         default_index=alignment_values.index(current_alignment) if current_alignment in alignment_values else 0,
@@ -661,10 +880,10 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
     if alignment is not None:
         layout["alignment"] = alignment
         layout["image_alignment"] = alignment
-    layout["image_max_width"] = int(Prompt.ask(_field(cfg, "image_max_width"), default=str(layout.get("image_max_width") or 1600)))
+    layout["image_max_width"] = int(prompt_text(_field(cfg, "image_max_width"), str(layout.get("image_max_width") or 1600)))
     table_modes = ["responsive", "fixed"]
     current_mode = str(layout.get("table_display_mode") or "responsive")
-    mode = select_option(
+    mode = _select_action(
         _field(cfg, "table_mode"),
         [(value, value) for value in table_modes],
         default_index=table_modes.index(current_mode) if current_mode in table_modes else 0,
@@ -703,6 +922,7 @@ def config_menu(path: Path | None = None) -> Path:
                 ("app", tr(cfg, "settings.app")),
                 ("profiles", tr(cfg, "settings.profiles")),
                 ("instances", tr(cfg, "settings.instances")),
+                ("jira", tr(cfg, "jira.settings")),
                 ("confluence_publish", tr(cfg, "settings.confluence_publish")),
                 ("doctor", tr(cfg, "settings.doctor")),
                 ("save", tr(cfg, "settings.save")),
@@ -714,37 +934,46 @@ def config_menu(path: Path | None = None) -> Path:
             choice = "cancel"
 
         changed = False
-        if choice == "summary":
-            _show_summary(cfg, config_path)
-        elif choice == "language":
-            changed = _edit_language(cfg)
-        elif choice == "app":
-            changed = _edit_app(cfg)
-        elif choice == "profiles":
-            changed = _edit_profiles(cfg)
-        elif choice == "instances":
-            changed = _instances_menu(cfg)
-        elif choice == "confluence_publish":
-            changed = _edit_confluence_publish(cfg)
-        elif choice == "doctor":
-            _show_doctor(cfg, config_path)
-        elif choice == "save":
-            save_config(cfg, config_path)
-            original = deepcopy(cfg)
-            dirty = False
-            console.print(f"[green]{tr(cfg, 'settings.saved', path=config_path)}[/green]")
-        elif choice == "save_return":
-            save_config(cfg, config_path)
-            console.print(f"[green]{tr(cfg, 'settings.saved', path=config_path)}[/green]")
-            return config_path
-        elif choice == "cancel":
-            if dirty:
-                confirm = _confirm(cfg, tr(cfg, "settings.cancel_return"), False)
-                if confirm is not True:
-                    continue
-                cfg = original
-                console.print(f"[yellow]{tr(cfg, 'settings.discard')}[/yellow]")
-            return config_path
+        snapshot = deepcopy(cfg)
+        try:
+            if choice == "summary":
+                _show_summary(cfg, config_path)
+            elif choice == "language":
+                changed = _edit_language(cfg)
+            elif choice == "app":
+                changed = _edit_app(cfg)
+            elif choice == "profiles":
+                changed = _edit_profiles(cfg)
+            elif choice == "instances":
+                changed = _instances_menu(cfg)
+            elif choice == "jira":
+                changed = _jira_settings_menu(cfg)
+            elif choice == "confluence_publish":
+                changed = _edit_confluence_publish(cfg)
+            elif choice == "doctor":
+                _show_doctor(cfg, config_path)
+            elif choice == "save":
+                save_config(cfg, config_path)
+                original = deepcopy(cfg)
+                dirty = False
+                console.print(f"[green]{tr(cfg, 'settings.saved', path=config_path)}[/green]")
+            elif choice == "save_return":
+                save_config(cfg, config_path)
+                console.print(f"[green]{tr(cfg, 'settings.saved', path=config_path)}[/green]")
+                return config_path
+            elif choice == "cancel":
+                if dirty:
+                    confirm = _confirm(cfg, tr(cfg, "settings.cancel_return"), False)
+                    if confirm is not True:
+                        continue
+                    cfg = original
+                    console.print(f"[yellow]{tr(cfg, 'settings.discard')}[/yellow]")
+                return config_path
+        except UserCancelled:
+            cfg.clear()
+            cfg.update(snapshot)
+            console.print(f"[dim]{tr(cfg, 'interactive.cancelled')}[/dim]")
+            continue
 
         if changed:
             dirty = True

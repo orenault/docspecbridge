@@ -131,7 +131,7 @@ def _adf_marks(marks: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     return out
 
 
-def _inlines_to_adf(inlines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _inlines_to_adf(inlines: list[dict[str, Any]], media_urls: dict[str, str] | None = None) -> list[dict[str, Any]]:
     out = []
     for item in inlines or []:
         if item.get("type") == "text":
@@ -142,30 +142,58 @@ def _inlines_to_adf(inlines: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif item.get("type") == "hard_break":
             out.append({"type": "hardBreak"})
         elif item.get("type") == "image":
-            # Jira media upload is a separate REST workflow. Preserve the reference as a link text
-            # rather than inventing an uploaded media id.
             src = str(item.get("src") or "")
-            if src:
+            url = (media_urls or {}).get(src) or (media_urls or {}).get(src.rsplit("/", 1)[-1])
+            if url:
+                out.append({"type": "text", "text": str(item.get("alt") or src or "image"), "marks": [{"type": "link", "attrs": {"href": url}}]})
+            elif src:
                 out.append({"type": "text", "text": src, "marks": [{"type": "link", "attrs": {"href": src}}]})
     return out
 
 
-def _blocks_to_adf(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _paragraph_to_adf(inlines: list[dict[str, Any]], media_urls: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Split paragraph images into mediaSingle blocks while preserving inline order."""
+    if not any(item.get("type") == "image" and ((media_urls or {}).get(str(item.get("src") or "")) or (media_urls or {}).get(str(item.get("src") or "").rsplit("/", 1)[-1])) for item in inlines or []):
+        return [{"type": "paragraph", "content": _inlines_to_adf(inlines or [], media_urls)}]
+    out: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    def flush() -> None:
+        nonlocal pending
+        if pending:
+            out.append({"type": "paragraph", "content": _inlines_to_adf(pending, media_urls)})
+            pending = []
+    for item in inlines or []:
+        if item.get("type") != "image":
+            pending.append(item); continue
+        src = str(item.get("src") or "")
+        url = (media_urls or {}).get(src) or (media_urls or {}).get(src.rsplit("/", 1)[-1])
+        if not url:
+            pending.append(item); continue
+        flush()
+        attrs: dict[str, Any] = {"type": "external", "url": url, "alt": str(item.get("alt") or "")}
+        if item.get("width"): attrs["width"] = int(item.get("width"))
+        if item.get("height"): attrs["height"] = int(item.get("height"))
+        out.append({"type": "mediaSingle", "attrs": {"layout": "center"}, "content": [{"type": "media", "attrs": attrs}]})
+    flush()
+    return out or [{"type": "paragraph", "content": []}]
+
+
+def _blocks_to_adf(blocks: list[dict[str, Any]], media_urls: dict[str, str] | None = None) -> list[dict[str, Any]]:
     out = []
     for block in blocks or []:
         kind = block.get("type")
         if kind == "paragraph":
-            out.append({"type": "paragraph", "content": _inlines_to_adf(block.get("inlines") or [])})
+            out.extend(_paragraph_to_adf(block.get("inlines") or [], media_urls))
         elif kind == "heading":
-            out.append({"type": "heading", "attrs": {"level": int(block.get("level") or 1)}, "content": _inlines_to_adf(block.get("inlines") or [])})
+            out.append({"type": "heading", "attrs": {"level": int(block.get("level") or 1)}, "content": _inlines_to_adf(block.get("inlines") or [], media_urls)})
         elif kind == "list":
-            items = [{"type": "listItem", "content": _blocks_to_adf(item.get("blocks") or [])} for item in block.get("items") or []]
+            items = [{"type": "listItem", "content": _blocks_to_adf(item.get("blocks") or [], media_urls)} for item in block.get("items") or []]
             node = {"type": "orderedList" if block.get("ordered") else "bulletList", "content": items}
             if block.get("ordered") and int(block.get("start") or 1) != 1:
                 node["attrs"] = {"order": int(block.get("start") or 1)}
             out.append(node)
         elif kind == "blockquote":
-            out.append({"type": "blockquote", "content": _blocks_to_adf(block.get("blocks") or [])})
+            out.append({"type": "blockquote", "content": _blocks_to_adf(block.get("blocks") or [], media_urls)})
         elif kind == "code_block":
             node = {"type": "codeBlock", "content": [{"type": "text", "text": str(block.get("text") or "")}]} 
             if block.get("language"): node["attrs"] = {"language": block.get("language")}
@@ -183,13 +211,19 @@ def _blocks_to_adf(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     cells.append({
                         "type": "tableHeader" if cell.get("header") else "tableCell",
                         "attrs": attrs,
-                        "content": _blocks_to_adf(cell.get("blocks") or []) or [{"type": "paragraph", "content": []}],
+                        "content": _blocks_to_adf(cell.get("blocks") or [], media_urls) or [{"type": "paragraph", "content": []}],
                     })
                 rows.append({"type": "tableRow", "content": cells})
             out.append({"type": "table", "content": rows})
         elif kind == "image":
             src = str(block.get("src") or "")
-            if src:
+            url = (media_urls or {}).get(src) or (media_urls or {}).get(src.rsplit("/", 1)[-1])
+            if url:
+                attrs: dict[str, Any] = {"type": "external", "url": url, "alt": str(block.get("alt") or "")}
+                if block.get("width"): attrs["width"] = int(block.get("width"))
+                if block.get("height"): attrs["height"] = int(block.get("height"))
+                out.append({"type": "mediaSingle", "attrs": {"layout": "center"}, "content": [{"type": "media", "attrs": attrs}]})
+            elif src:
                 out.append({"type": "paragraph", "content": [{"type": "text", "text": src, "marks": [{"type": "link", "attrs": {"href": src}}]}]})
         elif kind == "diagram":
             mermaid = str(block.get("mermaid") or "")
@@ -198,5 +232,5 @@ def _blocks_to_adf(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def canonical_to_adf(doc: dict[str, Any]) -> dict[str, Any]:
-    return {"version": 1, "type": "doc", "content": _blocks_to_adf(doc.get("blocks") or [])}
+def canonical_to_adf(doc: dict[str, Any], media_urls: dict[str, str] | None = None) -> dict[str, Any]:
+    return {"version": 1, "type": "doc", "content": _blocks_to_adf(doc.get("blocks") or [], media_urls)}

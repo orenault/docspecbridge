@@ -14,6 +14,7 @@ from typing import Any
 from xberg import ExtractInput, extract
 
 from . import __version__
+from .config import SUPPORTED_SOURCE_EXTENSIONS
 from .geometry import build_publication_variants, collect_image_geometry
 from .docx_publication import build_docx_publication
 from .ooxml import inspect_ooxml, read_ooxml_media
@@ -24,6 +25,7 @@ from .canonical import canonical_from_xhtml
 from .html_io import canonical_from_html_source, canonical_from_markdown
 from .package_io import write_canonical_package
 from .title_detection import apply_detected_title
+from .xlsx_io import extract_xlsx_to_package
 
 
 # Xberg sometimes escapes image markers as `\![...](...)`, notably for PPTX.
@@ -56,10 +58,19 @@ class XbergExtractor:
 
     def discover(self, source: Path) -> tuple[list[Path], Path]:
         app = self.config["app"]
-        extensions = {str(ext).lower() for ext in app["extensions"]}
+        supported = set(SUPPORTED_SOURCE_EXTENSIONS)
+        requested = ((self.config.get("_runtime") or {}).get("extensions") or [])
+        if requested:
+            extensions = {str(ext).strip().lower() for ext in requested if str(ext).strip()}
+            extensions = {ext if ext.startswith(".") else f".{ext}" for ext in extensions}
+            unsupported = sorted(extensions - supported)
+            if unsupported:
+                raise ValueError(f"Unsupported source extension filter: {', '.join(unsupported)}")
+        else:
+            extensions = supported
         if source.is_file():
             if source.suffix.lower() not in extensions:
-                raise ValueError(f"Extension non autorisée dans la configuration: {source.suffix}")
+                raise ValueError(f"Unsupported source format: {source.suffix}")
             return [source.resolve()], source.parent.resolve()
         if not source.is_dir():
             raise FileNotFoundError(source)
@@ -103,6 +114,15 @@ class XbergExtractor:
             if app_cfg.get("copy_source", True):
                 if source.resolve() != source_copy.resolve():
                     shutil.copy2(source, source_copy)
+
+            # XLSX is handled natively to preserve worksheet boundaries, formulas and charts.
+            if source.suffix.lower() == ".xlsx":
+                result = extract_xlsx_to_package(source, package_dir, self.config)
+                outcome.markdown = result["root"]["human_markdown"]
+                for image in sorted(package_dir.rglob("images/*")):
+                    if image.is_file():
+                        outcome.images.append(image)
+                return outcome
 
             # Native structured-text sources do not need Xberg. HTML/Markdown enter
             # the same CanonicalDocument pipeline as Office/PDF, then all target views

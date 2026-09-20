@@ -18,6 +18,7 @@ from md2conf.publisher import Publisher
 
 from .config import get_confluence_instance, normalize_domain
 from .i18n import tr
+from .package_io import read_manifest, resolve_package_output
 
 
 def _token(instance: dict[str, Any]) -> str:
@@ -249,8 +250,8 @@ def _write_global_properties(page_width: str | None) -> Path | None:
 
 
 def _package_document(md: Path) -> dict[str, Any]:
-    path = md.parent / "document.json"
-    if not path.is_file():
+    path = resolve_package_output(md.parent, "document_json", "document.json")
+    if not path:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -506,6 +507,93 @@ def suggest_add_title(
     return _unique_add_title(instance, space_id, requested.strip(), suffix)
 
 
+def _legacy_rest_base(instance: dict[str, Any]) -> str:
+    return _gateway_base(instance).rstrip("/") + "/wiki/rest/api"
+
+
+def _download_url(instance: dict[str, Any], link: str) -> str:
+    link = str(link or "").strip()
+    if link.startswith(("http://", "https://")):
+        return link
+    gateway = _gateway_base(instance).rstrip("/")
+    if str(instance.get("auth_type") or "classic").lower() == "scoped":
+        return gateway + (link if link.startswith("/") else "/" + link)
+    # v2 downloadLink is commonly relative to /wiki, not /wiki/api/v2.
+    if link.startswith("/wiki/"):
+        return gateway + link
+    return gateway + "/wiki" + (link if link.startswith("/") else "/" + link)
+
+
+def _package_attachment_files(md: Path, config: dict[str, Any]) -> list[Path]:
+    publication_cfg = ((config.get("confluence") or {}).get("publication") or {})
+    mode = str(publication_cfg.get("attachments") or "none").lower()
+    if mode == "none":
+        return []
+    package = md.parent
+    manifest = read_manifest(package)
+    outputs = manifest.get("outputs") or {}
+    selected: list[Path] = []
+    if mode in {"source", "all"}:
+        source = manifest.get("source") or {}
+        candidates = [source.get("packaged_file"), Path(str(source.get("original_path") or "")).name]
+        for name in candidates:
+            if name and (package / str(name)).is_file():
+                selected.append(package / str(name)); break
+    if mode in {"rendered", "all"}:
+        for key in ("human_markdown", "rag_markdown", "html", "document_json"):
+            value = outputs.get(key)
+            if value and (package / str(value)).is_file():
+                selected.append(package / str(value))
+        if mode == "all":
+            for folder in (package / "images", package / "attachments"):
+                if folder.is_dir():
+                    selected.extend(sorted(p for p in folder.rglob("*") if p.is_file()))
+    # Dedupe by basename because Confluence attachment identity is filename-based.
+    unique: dict[str, Path] = {}
+    for path in selected:
+        unique[path.name] = path
+    return list(unique.values())
+
+
+def _upload_page_attachments(instance: dict[str, Any], page_id: str, md: Path, config: dict[str, Any]) -> list[str]:
+    import shutil
+    files = _package_attachment_files(md, config)
+    publication_cfg = ((config.get("confluence") or {}).get("publication") or {})
+    zip_path: Path | None = None
+    if publication_cfg.get("attachment_zip", False):
+        package = md.parent
+        zip_base = package.parent / f"{package.name}-package"
+        archive = shutil.make_archive(str(zip_base), "zip", root_dir=package.parent, base_dir=package.name)
+        zip_path = Path(archive)
+        files.append(zip_path)
+    if not files:
+        return []
+    existing = {str(x.get("title") or ""): x for x in _paged_get(instance, f"/pages/{page_id}/attachments", {"limit": 250})}
+    uploaded: list[str] = []
+    try:
+        with httpx.Client(auth=_auth(instance), timeout=120.0, follow_redirects=True, headers={"Accept": "application/json"}) as client:
+            for path in files:
+                previous = existing.get(path.name) or {}
+                try:
+                    previous_size = int(previous.get("fileSize")) if previous.get("fileSize") is not None else None
+                except (TypeError, ValueError):
+                    previous_size = None
+                if previous_size == path.stat().st_size:
+                    continue
+                with path.open("rb") as handle:
+                    response = client.post(
+                        f"{_legacy_rest_base(instance)}/content/{page_id}/child/attachment",
+                        headers={"X-Atlassian-Token": "no-check", "Accept": "application/json"},
+                        files={"file": (path.name, handle, "application/octet-stream")},
+                    )
+                response.raise_for_status()
+                uploaded.append(path.name)
+    finally:
+        if zip_path is not None:
+            zip_path.unlink(missing_ok=True)
+    return uploaded
+
+
 @dataclass
 class PublicationResult:
     source: Path
@@ -626,6 +714,31 @@ def publish(
     mode: str | None = None,
     title: str | None = None,
 ) -> list[PublicationResult]:
+    # 0.5.0 workbook packages declare child worksheet packages explicitly. Publish
+    # the workbook first, then each worksheet below that page regardless of the global
+    # keep_hierarchy switch; this mirrors the Excel workbook structure.
+    if source.is_dir():
+        package_manifest = read_manifest(source)
+        children = package_manifest.get("children") or []
+        root_md = _publication_markdown_from_manifest(source / "manifest.json") if children else None
+        if children and root_md is not None:
+            root_results = publish(
+                config, root_md, space_key=space_key, root_page=root_page, instance_name=instance_name,
+                keep_hierarchy=False, overwrite_manual_changes=overwrite_manual_changes, mode=mode, title=title,
+            )
+            if not root_results or not root_results[0].page_id:
+                raise RuntimeError("Unable to resolve the workbook page ID before worksheet publication.")
+            results = list(root_results)
+            for child in children:
+                child_package = source / str(child.get("package") or "")
+                if child_package.is_dir():
+                    results.extend(publish(
+                        config, child_package, space_key=space_key, root_page=root_results[0].page_id,
+                        instance_name=instance_name, keep_hierarchy=False,
+                        overwrite_manual_changes=overwrite_manual_changes, mode=mode,
+                    ))
+            return results
+
     instance_name, instance, properties = connection_properties(config, instance_name, space_key)
     space = space_key or str(instance.get("default_space") or "").strip()
     if not space:
@@ -749,7 +862,10 @@ def publish(
             if verify and not pages:
                 raise RuntimeError(f"Publication hiérarchique non confirmée pour '{expected}'.")
             page = pages[0] if pages else {}
-            results.append(PublicationResult(md, str(page.get("id") or ""), expected, space, str(page.get("parentId") or root), "sync"))
+            page_id = str(page.get("id") or "")
+            if page_id:
+                _upload_page_attachments(instance, page_id, md, config)
+            results.append(PublicationResult(md, page_id, expected, space, str(page.get("parentId") or root), "sync"))
         return results
 
     results: list[PublicationResult] = []
@@ -776,7 +892,7 @@ def publish(
                     if overwrite_manual_changes is None else bool(overwrite_manual_changes)
                 ),
                 comments=str(cf.get("comments") or "remove"),
-                # Critical 0.4.2 rule: render_document.md is target-agnostic.
+                # Generated publication Markdown remains target-agnostic.
                 skip_update=True,
                 converter=converter,
                 global_properties=global_properties,
@@ -816,6 +932,7 @@ def publish(
                 title=final_title,
                 publication_mode=publish_mode,
             )
+            _upload_page_attachments(instance, page_id, md, config)
             results.append(PublicationResult(md, page_id, final_title, space, root, action))
     finally:
         if global_properties is not None:
@@ -844,7 +961,7 @@ def _storage_body_value(page: dict[str, Any]) -> str:
 def _normalize_storage_for_canonical(storage: str) -> str:
     """Convert common Confluence Storage Format nodes to neutral XHTML.
 
-    The original storage is always preserved beside document.json, so unsupported
+    The original storage is always preserved beside the canonical JSON, so unsupported
     macros are not destroyed; they simply become textual placeholders in the canonical
     view until a dedicated adapter exists.
     """
@@ -881,6 +998,7 @@ def _normalize_storage_for_canonical(storage: str) -> str:
 
 def export_page_to_package(
     config: dict[str, Any], page_id: str, destination: Path, *, instance_name: str | None = None,
+    attachment_mode: str | None = None, zip_package: bool | None = None,
 ) -> Path:
     from .canonical import canonical_from_xhtml
     from .package_io import write_canonical_package
@@ -896,7 +1014,13 @@ def export_page_to_package(
 
     assets: list[dict[str, Any]] = []
     attachments_dir = package / "attachments"
-    attachment_rows = _paged_get(instance, f"/pages/{page_id}/attachments", {"limit": 250})
+    export_cfg = ((config.get("confluence") or {}).get("export") or {})
+    effective_attachment_mode = str(attachment_mode or export_cfg.get("attachment_mode") or "all").lower()
+    if effective_attachment_mode not in {"none", "images", "all"}:
+        raise ValueError("Confluence attachment_mode must be none, images or all")
+    attachment_rows = _paged_get(instance, f"/pages/{page_id}/attachments", {"limit": 250}) if effective_attachment_mode != "none" else []
+    if effective_attachment_mode == "images":
+        attachment_rows = [x for x in attachment_rows if str(x.get("mediaType") or "").lower().startswith("image/")]
     if attachment_rows:
         attachments_dir.mkdir(parents=True, exist_ok=True)
         with httpx.Client(auth=_auth(instance), timeout=60.0, follow_redirects=True) as client:
@@ -905,7 +1029,7 @@ def export_page_to_package(
                 link = str(item.get("downloadLink") or (item.get("_links") or {}).get("download") or "").strip()
                 if not link:
                     continue
-                url = link if link.startswith(("http://", "https://")) else _gateway_base(instance).rstrip("/") + (link if link.startswith("/") else "/" + link)
+                url = _download_url(instance, link)
                 try:
                     response = client.get(url)
                     response.raise_for_status()
@@ -943,6 +1067,10 @@ def export_page_to_package(
         stem=safe_stem(title),
         rag_profile=((config.get("profiles") or {}).get("rag") or {}),
         publication_profile=((config.get("profiles") or {}).get("publication") or {}),
-        extra_manifest={"confluence": {"storage_source": "confluence.storage.xhtml"}},
+        extra_manifest={"confluence": {"storage_source": "confluence.storage.xhtml", "attachment_mode": effective_attachment_mode}},
     )
+    effective_zip = bool(export_cfg.get("zip_package", False)) if zip_package is None else bool(zip_package)
+    if effective_zip:
+        import shutil
+        shutil.make_archive(str(package), "zip", root_dir=package.parent, base_dir=package.name)
     return package

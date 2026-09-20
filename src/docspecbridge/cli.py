@@ -7,8 +7,8 @@ import time
 from typing import Annotated, Optional
 
 import typer
+import yaml
 from rich.console import Console
-from rich.prompt import Prompt
 from rich.table import Table
 
 from . import __version__
@@ -30,8 +30,8 @@ from .extractor import run_extract
 from .rag_export import export_rag_corpus
 from .utils import write_json, safe_stem
 from .i18n import config_language, tr
-from .ui import edit_text, select_option
-from .jira import export_issue, create_issue_from_markdown
+from .ui import UserCancelled, edit_text, prompt_text, select_option
+from .jira import export_issue, create_issue_from_markdown, list_projects, list_issue_types, list_issues, jira_instances
 from .html_io import canonical_from_html_source, canonical_from_markdown
 from .package_io import write_canonical_package
 from .renderers import render_html
@@ -46,10 +46,42 @@ def _h(key: str) -> str:
 
 app = typer.Typer(add_completion=False, no_args_is_help=False, help=_h("cli.app.help"))
 console = Console()
+_CLI_SET_OVERRIDES: list[str] = []
 
 
-def _cfg(config: Optional[Path]):
+def _parse_set_value(raw: str) -> tuple[str, Any]:
+    if "=" not in raw:
+        raise typer.BadParameter("--set expects dotted.path=value")
+    key, value = raw.split("=", 1)
+    key = key.strip()
+    if not key:
+        raise typer.BadParameter("--set key cannot be empty")
+    try:
+        parsed = yaml.safe_load(value)
+    except Exception:
+        parsed = value
+    return key, parsed
+
+
+def _apply_set_overrides(cfg: dict) -> dict:
+    for raw in _CLI_SET_OVERRIDES:
+        key, value = _parse_set_value(raw)
+        cursor: dict = cfg
+        parts = [part for part in key.split(".") if part]
+        for part in parts[:-1]:
+            child = cursor.get(part)
+            if not isinstance(child, dict):
+                child = {}
+                cursor[part] = child
+            cursor = child
+        cursor[parts[-1]] = value
+    return cfg
+
+
+def _cfg(config: Optional[Path], *, apply_overrides: bool = True):
     cfg = load_config(config)
+    if apply_overrides:
+        _apply_set_overrides(cfg)
     ensure_workdirs(cfg)
     return cfg
 
@@ -74,12 +106,28 @@ def _select_instance(cfg: dict, default: str | None = None) -> str:
     if not names:
         raise RuntimeError(tr(cfg, "confluence.no_instance"))
     if len(names) == 1:
+        console.print(f"[dim]{tr(cfg, 'interactive.instance')}: {names[0]}[/dim]")
         return names[0]
     default_name = default or str(cfg.get("confluence", {}).get("default_instance") or names[0])
     default_idx = names.index(default_name) if default_name in names else 0
     selected = select_option(tr(cfg, "settings.instances"), [(name, name) for name in names], default_index=default_idx)
     if selected is None:
-        raise RuntimeError(tr(cfg, "common.cancelled"))
+        raise UserCancelled()
+    return selected
+
+
+def _select_jira_instance(cfg: dict, default: str | None = None) -> str:
+    names = list(jira_instances(cfg))
+    if not names:
+        raise RuntimeError(tr(cfg, "jira.no_instance"))
+    if len(names) == 1:
+        console.print(f"[dim]{tr(cfg, 'interactive.instance')}: {names[0]}[/dim]")
+        return names[0]
+    default_name = default or str((cfg.get("jira") or {}).get("default_instance") or (cfg.get("confluence") or {}).get("default_instance") or names[0])
+    default_idx = names.index(default_name) if default_name in names else 0
+    selected = select_option(tr(cfg, "jira.settings.default_instance"), [(name, name) for name in names], default_index=default_idx)
+    if selected is None:
+        raise UserCancelled()
     return selected
 
 
@@ -107,9 +155,25 @@ def _root_table(cfg: dict, space: dict, pages: list[dict]) -> None:
     console.print(table)
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"DocSpecBridge {__version__}")
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True, help=_h("cli.main.help"))
-def main(ctx: typer.Context) -> None:
-    """Sans sous-commande, ouvre le menu interactif."""
+def main(
+    ctx: typer.Context,
+    version: Annotated[Optional[bool], typer.Option(
+        "--version", "-V", callback=_version_callback, is_eager=True, help="Show DocSpecBridge version and exit."
+    )] = None,
+    set_value: Annotated[Optional[list[str]], typer.Option(
+        "--set", help="Override any YAML setting: --set dotted.path=value (repeatable; highest precedence)."
+    )] = None,
+) -> None:
+    """Without a subcommand, open the interactive menu. --set can override every YAML key."""
+    global _CLI_SET_OVERRIDES
+    _CLI_SET_OVERRIDES = list(set_value or [])
     if ctx.invoked_subcommand is None:
         menu()
 
@@ -127,7 +191,7 @@ def extract(
 ) -> None:
     """Extrait DOCX/PDF/PPTX vers publication Markdown + RAG + images."""
     cfg = _runtime_config(
-        _cfg(config), recursive=recursive, extensions=extension, overwrite=overwrite,
+        _cfg(config, apply_overrides=False), recursive=recursive, extensions=extension, overwrite=overwrite,
         chunk_size=chunk_size, overlap=overlap,
     )
     source = source or Path(cfg["app"]["source"])
@@ -199,7 +263,7 @@ def publish_cmd(
 ) -> None:
     """Publie les Markdown publication dans Confluence Cloud avec leurs images inline."""
     cfg = _runtime_config(
-        _cfg(config), keep_hierarchy=keep_hierarchy, comments=comments, heading_anchors=heading_anchors,
+        _cfg(config, apply_overrides=False), keep_hierarchy=keep_hierarchy, comments=comments, heading_anchors=heading_anchors,
         write_page_id=write_page_id, image_max_width=image_max_width, table_mode=table_mode, page_width=page_width,
         render_mermaid=render_mermaid,
     )
@@ -249,7 +313,7 @@ def _runtime_config(
     if recursive is not None:
         runtime["app"]["recursive"] = recursive
     if extensions:
-        runtime["app"]["extensions"] = [e if e.startswith(".") else f".{e}" for e in extensions]
+        runtime.setdefault("_runtime", {})["extensions"] = [e if e.startswith(".") else f".{e}" for e in extensions]
     if overwrite:
         runtime["app"]["overwrite"] = True
     cf = runtime.setdefault("confluence", {})
@@ -275,7 +339,7 @@ def _runtime_config(
             raise ValueError("--page-width must be narrow, wide, max or confluence-default")
         cf["page_width"] = page_width
     if render_mermaid is not None:
-        cf["render_mermaid"] = render_mermaid
+        cf.setdefault("converter", {})["render_mermaid"] = render_mermaid
     chunking = runtime.setdefault("profiles", {}).setdefault("rag", {}).setdefault("chunking", {})
     if chunk_size is not None:
         chunking["max_characters"] = chunk_size
@@ -283,7 +347,7 @@ def _runtime_config(
         chunking["overlap"] = overlap
     if copy_rag_assets is not None:
         runtime.setdefault("rag_export", {})["copy_assets"] = copy_rag_assets
-    return runtime
+    return _apply_set_overrides(runtime)
 
 
 def _batch_report(path: Path, kind: str, outcomes: list, **extra) -> None:
@@ -317,7 +381,7 @@ def rag_export_cmd(
     config: Annotated[Optional[Path], typer.Option("--config", "-c")] = None,
 ) -> None:
     """Agrège les packages extraits en corpus RAG portable (sans vector-store spécifique)."""
-    cfg = _runtime_config(_cfg(config), copy_rag_assets=copy_assets)
+    cfg = _runtime_config(_cfg(config, apply_overrides=False), copy_rag_assets=copy_assets)
     source = source or Path(cfg["app"]["destination"])
     rag_cfg = cfg.get("rag_export") or {}
     dest = dest or Path(str(rag_cfg.get("destination") or "./rag"))
@@ -353,7 +417,7 @@ def doc2wiki_cmd(
 ) -> None:
     """Document(s) -> extraction -> Confluence. Sans option, utilise entièrement le YAML."""
     cfg = _runtime_config(
-        _cfg(config), recursive=recursive, extensions=extension, overwrite=overwrite, keep_hierarchy=keep_hierarchy,
+        _cfg(config, apply_overrides=False), recursive=recursive, extensions=extension, overwrite=overwrite, keep_hierarchy=keep_hierarchy,
         comments=comments, heading_anchors=heading_anchors, write_page_id=write_page_id,
         image_max_width=image_max_width, table_mode=table_mode, page_width=page_width, render_mermaid=render_mermaid,
     )
@@ -411,7 +475,7 @@ def doc2rag_cmd(
 ) -> None:
     """Document(s) -> extraction -> corpus RAG portable. N'effectue pas d'embedding/vectorisation."""
     cfg = _runtime_config(
-        _cfg(config), recursive=recursive, extensions=extension, overwrite=overwrite,
+        _cfg(config, apply_overrides=False), recursive=recursive, extensions=extension, overwrite=overwrite,
         chunk_size=chunk_size, overlap=overlap, copy_rag_assets=copy_assets,
     )
     source = source or Path(cfg["app"]["source"])
@@ -444,14 +508,19 @@ def conf2md_cmd(
     page_id: Annotated[str, typer.Option("--page-id", help=_h("cli.opt.page_id"))],
     dest: Annotated[Optional[Path], typer.Option("--dest", "-d", help=_h("cli.opt.dest"))] = None,
     instance: Annotated[Optional[str], typer.Option("--instance", "-i", help=_h("cli.opt.instance"))] = None,
+    attachments: Annotated[Optional[str], typer.Option("--attachments", help="none | images | all")] = None,
+    zip_package: Annotated[Optional[bool], typer.Option("--zip-package/--no-zip-package")] = None,
     config: Annotated[Optional[Path], typer.Option("--config", "-c", help=_h("cli.opt.config"))] = None,
 ) -> None:
     """Confluence Cloud page -> CanonicalDocument + readable Markdown/HTML/RAG."""
     cfg = _cfg(config)
     selected = instance or _select_instance(cfg)
     destination = dest or Path(cfg["app"]["destination"])
-    package = export_page_to_package(cfg, page_id, destination, instance_name=selected)
+    package = export_page_to_package(cfg, page_id, destination, instance_name=selected, attachment_mode=attachments, zip_package=zip_package)
     console.print(f"[green]{tr(cfg, 'confluence.export_done', package=package)}[/green]")
+
+
+app.command("extract-confluence")(conf2md_cmd)
 
 
 @app.command("jira2md", help=_h("cli.jira2md.help"))
@@ -466,6 +535,9 @@ def jira2md_cmd(
     destination = dest or Path(cfg["app"]["destination"])
     package = export_issue(cfg, issue, destination, instance_name=instance)
     console.print(f"[green]{tr(cfg, 'jira.export_done', package=package)}[/green]")
+
+
+app.command("extract-jira")(jira2md_cmd)
 
 
 @app.command("md2jira", help=_h("cli.md2jira.help"))
@@ -485,6 +557,69 @@ def md2jira_cmd(
         parent=parent, instance_name=instance,
     )
     console.print(f"[green]{tr(cfg, 'jira.create_done', key=result.get('key', result.get('id', '')))}[/green]")
+
+
+app.command("import-jira")(md2jira_cmd)
+
+
+@app.command("jira-projects")
+def jira_projects_cmd(
+    query: Annotated[Optional[str], typer.Option("--query", "-q", help="Filter project key/name")] = None,
+    instance: Annotated[Optional[str], typer.Option("--instance", "-i")] = None,
+    config: Annotated[Optional[Path], typer.Option("--config", "-c")] = None,
+) -> None:
+    """List/search Jira projects visible to the configured account."""
+    cfg = _cfg(config)
+    rows = list_projects(cfg, instance, query=query)
+    table = Table(title="Jira projects")
+    table.add_column("Key"); table.add_column("Name"); table.add_column("ID")
+    for row in rows:
+        table.add_row(str(row.get("key") or ""), str(row.get("name") or ""), str(row.get("id") or ""))
+    console.print(table)
+
+
+@app.command("jira-issues")
+def jira_issues_cmd(
+    project: Annotated[str, typer.Option("--project", "-p")],
+    issue_type: Annotated[Optional[str], typer.Option("--type", "-t", help="Filter by Jira issue type")] = None,
+    query: Annotated[Optional[str], typer.Option("--query", "-q", help="Filter issue key/summary/text")] = None,
+    limit: Annotated[int, typer.Option("--limit", "-l", min=1, max=100)] = 50,
+    instance: Annotated[Optional[str], typer.Option("--instance", "-i")] = None,
+    config: Annotated[Optional[Path], typer.Option("--config", "-c")] = None,
+) -> None:
+    """List the first discovery page of Jira issues for a project."""
+    cfg = _cfg(config)
+    page = list_issues(cfg, project, instance, issue_type=issue_type, query=query, max_results=limit)
+    rows = page.get("issues") or []
+    table = Table(title=tr(cfg, "jira.discovery.title", project=project, count=len(rows)))
+    table.add_column("Key"); table.add_column(tr(cfg, "common.title")); table.add_column("Type"); table.add_column("Status"); table.add_column("Updated")
+    for row in rows:
+        fields = row.get("fields") or {}
+        table.add_row(
+            str(row.get("key") or ""), str(fields.get("summary") or ""),
+            str(((fields.get("issuetype") or {}).get("name") if isinstance(fields.get("issuetype"), dict) else "") or ""),
+            str(((fields.get("status") or {}).get("name") if isinstance(fields.get("status"), dict) else "") or ""),
+            str(fields.get("updated") or ""),
+        )
+    console.print(table)
+    if page.get("next_page_token"):
+        console.print(f"[dim]{tr(cfg, 'jira.discovery.more_available')}[/dim]")
+
+
+@app.command("jira-issue-types")
+def jira_issue_types_cmd(
+    project: Annotated[str, typer.Option("--project", "-p")],
+    instance: Annotated[Optional[str], typer.Option("--instance", "-i")] = None,
+    config: Annotated[Optional[Path], typer.Option("--config", "-c")] = None,
+) -> None:
+    """List issue types available in a selected Jira project."""
+    cfg = _cfg(config)
+    rows = list_issue_types(cfg, project, instance)
+    table = Table(title=f"Jira issue types - {project}")
+    table.add_column("Name"); table.add_column("ID"); table.add_column("Subtask")
+    for row in rows:
+        table.add_row(str(row.get("name") or ""), str(row.get("id") or ""), str(bool(row.get("subtask"))))
+    console.print(table)
 
 
 @app.command("web2md", help=_h("cli.web2md.help"))
@@ -523,8 +658,9 @@ def html2md_cmd(
     config: Annotated[Optional[Path], typer.Option("--config", "-c", help=_h("cli.opt.config"))] = None,
     overwrite: Annotated[bool, typer.Option("--overwrite", help=_h("cli.opt.overwrite"))] = False,
 ) -> None:
-    cfg = _cfg(config)
+    cfg = _cfg(config, apply_overrides=False)
     cfg["app"]["overwrite"] = overwrite or bool(cfg["app"].get("overwrite", False))
+    _apply_set_overrides(cfg)
     destination = dest or Path(cfg["app"]["destination"])
     outcomes = run_extract(cfg, source, destination)
     for item in outcomes:
@@ -553,6 +689,25 @@ def config_cmd(
     config_menu(config)
 
 
+@app.command("config-keys")
+def config_keys_cmd(
+    config: Annotated[Optional[Path], typer.Option("--config", "-c")] = None,
+) -> None:
+    """List every effective YAML key that can be overridden with --set."""
+    cfg = _cfg(config)
+    table = Table(title="DocSpecBridge configuration keys (--set dotted.path=value)")
+    table.add_column("Key"); table.add_column("Current value")
+    def walk(value, prefix=""):
+        if isinstance(value, dict):
+            for key in sorted(value):
+                yield from walk(value[key], f"{prefix}.{key}" if prefix else str(key))
+        else:
+            yield prefix, value
+    for key, value in walk(cfg):
+        table.add_row(key, json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value)
+    console.print(table)
+
+
 @app.command(help=_h("cli.doctor.help"))
 def doctor(
     config: Annotated[Optional[Path], typer.Option("--config", "-c")] = None,
@@ -568,9 +723,13 @@ def doctor(
     console.print(table)
 
 
+def _cancelled(cfg: dict) -> None:
+    console.print(f"[dim]{tr(cfg, 'interactive.cancelled')}[/dim]")
+
+
 def _interactive_extract(cfg: dict) -> None:
-    source = Path(Prompt.ask(tr(cfg, "interactive.source"), default=str(cfg["app"]["source"])))
-    dest = Path(Prompt.ask(tr(cfg, "interactive.destination"), default=str(cfg["app"]["destination"])))
+    source = Path(prompt_text(tr(cfg, "interactive.source"), str(cfg["app"]["source"])))
+    dest = Path(prompt_text(tr(cfg, "interactive.destination"), str(cfg["app"]["destination"])))
     outcomes = run_extract(cfg, source, dest)
     for item in outcomes:
         if item.error:
@@ -583,34 +742,184 @@ def _interactive_extract(cfg: dict) -> None:
         console.print(f"[yellow]{tr(cfg, 'extract.no_document_dir', source=source)}[/yellow]")
 
 
+def _jira_defaults(cfg: dict, instance_name: str) -> dict:
+    jira = cfg.setdefault("jira", {})
+    defaults = jira.setdefault("defaults", {})
+    value = defaults.setdefault(instance_name, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _select_confluence_location(cfg: dict, instance_name: str) -> tuple[dict, dict, list[dict]]:
+    """Always discover and display Confluence space/page choices.
+
+    Configured defaults are used only to pre-position the selector; they never bypass
+    discovery or hide the selected location from the user.
+    """
+    spaces = list_spaces(cfg, instance_name)
+    if not spaces:
+        raise RuntimeError(tr(cfg, "confluence.no_space"))
+    instance_cfg = confluence_instances(cfg)[instance_name]
+    default_space = str(instance_cfg.get("default_space") or "")
+    if default_space:
+        console.print(f"[dim]{tr(cfg, 'confluence.current_default', value=default_space)}[/dim]")
+    default_idx = next((idx for idx, item in enumerate(spaces) if str(item.get("key") or "") == default_space), 0)
+    space_id = select_option(
+        tr(cfg, "interactive.space_select"),
+        [(str(item.get("id") or ""), f"{item.get('key', '')} - {item.get('name', '')}") for item in spaces],
+        default_index=default_idx,
+    )
+    if space_id is None:
+        raise UserCancelled()
+    space_obj = next(item for item in spaces if str(item.get("id") or "") == str(space_id))
+
+    max_depth = int(((cfg.get("confluence") or {}).get("page_selector") or {}).get("max_depth", 0))
+    pages = list_root_pages(cfg, instance_name, str(space_id), max_depth=max_depth)
+    if not pages:
+        raise RuntimeError(tr(cfg, "confluence.no_pages"))
+
+    same_default_space = str(space_obj.get("key") or "") == default_space
+    default_page = str(instance_cfg.get("root_page") or "") if same_default_space else ""
+    default_page = default_page or str(space_obj.get("homepageId") or "")
+    if default_page:
+        default_obj = next((p for p in pages if str(p.get("id") or "") == default_page), None)
+        default_label = str((default_obj or {}).get("tree_label") or (default_obj or {}).get("title") or default_page)
+        console.print(f"[dim]{tr(cfg, 'confluence.current_default', value=default_label)}[/dim]")
+    default_page_idx = next((idx for idx, item in enumerate(pages) if str(item.get("id") or "") == default_page), 0)
+    page_id = select_option(
+        tr(cfg, "interactive.page_select"),
+        [
+            (
+                str(item.get("id") or ""),
+                f"{item.get('tree_label') or item.get('title') or ''} (ID {item.get('id') or ''})",
+            )
+            for item in pages
+        ],
+        default_index=default_page_idx,
+    )
+    if page_id is None:
+        raise UserCancelled()
+    page_obj = next(item for item in pages if str(item.get("id") or "") == str(page_id))
+    return space_obj, page_obj, pages
+
+
+def _select_jira_project(cfg: dict, instance_name: str, *, ask_filter: bool = False) -> dict:
+    query = None
+    if ask_filter:
+        query = prompt_text(tr(cfg, "interactive.project_filter"), "").strip() or None
+    projects = list_projects(cfg, instance_name, query=query)
+    if not projects:
+        raise RuntimeError(tr(cfg, "jira.no_project"))
+    defaults = _jira_defaults(cfg, instance_name)
+    default_project = str(defaults.get("project") or "")
+    if default_project:
+        console.print(f"[dim]{tr(cfg, 'jira.current_default', value=default_project)}[/dim]")
+    default_idx = next(
+        (idx for idx, row in enumerate(projects) if str(row.get("key") or row.get("id") or "") == default_project),
+        0,
+    )
+    project_key = select_option(
+        tr(cfg, "interactive.project_select"),
+        [
+            (str(row.get("key") or row.get("id") or ""), f"{row.get('key', '')} — {row.get('name', '')}")
+            for row in projects
+        ],
+        default_index=default_idx,
+    )
+    if project_key is None:
+        raise UserCancelled()
+    return next(row for row in projects if str(row.get("key") or row.get("id") or "") == str(project_key))
+
+
+def _select_jira_issue_type(cfg: dict, instance_name: str, project_key: str) -> str:
+    types = list_issue_types(cfg, project_key, instance_name)
+    if not types:
+        raise RuntimeError(tr(cfg, "jira.no_issue_type", project=project_key))
+    defaults = _jira_defaults(cfg, instance_name)
+    default_type = str(defaults.get("issue_type") or "") if str(defaults.get("project") or "") == project_key else ""
+    if default_type:
+        console.print(f"[dim]{tr(cfg, 'jira.current_default', value=default_type)}[/dim]")
+    default_idx = next(
+        (idx for idx, row in enumerate(types) if str(row.get("name") or row.get("id") or "") == default_type),
+        0,
+    )
+    issue_type = select_option(
+        tr(cfg, "interactive.issue_type_select"),
+        [(str(row.get("name") or row.get("id") or ""), str(row.get("name") or row.get("id") or "")) for row in types],
+        default_index=default_idx,
+    )
+    if issue_type is None:
+        raise UserCancelled()
+    return str(issue_type)
+
+
+
+def _jira_issue_label(issue: dict) -> str:
+    fields = issue.get("fields") or {}
+    key = str(issue.get("key") or issue.get("id") or "")
+    summary = str(fields.get("summary") or "")
+    status = str(((fields.get("status") or {}).get("name") if isinstance(fields.get("status"), dict) else "") or "")
+    issue_type = str(((fields.get("issuetype") or {}).get("name") if isinstance(fields.get("issuetype"), dict) else "") or "")
+    updated = str(fields.get("updated") or "")[:16].replace("T", " ")
+    details = " · ".join(x for x in (issue_type, status, updated) if x)
+    return f"{key} — {summary}" + (f" [{details}]" if details else "")
+
+
+def _select_jira_issue(cfg: dict, instance_name: str, project_key: str, issue_type: str) -> str:
+    discovery = (cfg.get("jira") or {}).get("discovery") or {}
+    page_size = max(1, min(int(discovery.get("page_size", 50)), 100))
+    query: str | None = None
+    next_token: str | None = None
+    while True:
+        page = list_issues(
+            cfg, project_key, instance_name, issue_type=issue_type, query=query,
+            next_page_token=next_token, max_results=page_size,
+        )
+        issues = page.get("issues") or []
+        options: list[tuple[object, str]] = [
+            (("issue", str(row.get("key") or row.get("id") or "")), _jira_issue_label(row))
+            for row in issues
+        ]
+        options.append((("search", None), tr(cfg, "jira.discovery.search")))
+        if query:
+            options.append((("reset", None), tr(cfg, "jira.discovery.reset")))
+        if page.get("next_page_token"):
+            options.append((("next", str(page.get("next_page_token"))), tr(cfg, "jira.discovery.next")))
+        options.append((("back", None), tr(cfg, "common.back")))
+        title = tr(cfg, "jira.discovery.title_typed", project=project_key, issue_type=issue_type, count=len(issues))
+        choice = select_option(title, options)
+        if choice is None or choice[0] == "back":
+            raise UserCancelled()
+        action, value = choice
+        if action == "issue":
+            return str(value)
+        if action == "search":
+            query = prompt_text(tr(cfg, "jira.discovery.search_prompt"), query or "").strip() or None
+            next_token = None
+        elif action == "reset":
+            query = None
+            next_token = None
+        elif action == "next":
+            next_token = str(value or "") or None
+
+
 def _interactive_import(cfg: dict) -> None:
     selected = _select_instance(cfg)
-    source = Path(Prompt.ask(tr(cfg, "interactive.package"), default=str(cfg["app"]["destination"])))
+    source = Path(prompt_text(tr(cfg, "interactive.package"), str(cfg["app"]["destination"])))
     md_files = find_markdown_inputs(source)
     if not md_files:
         raise RuntimeError(tr(cfg, "confluence.no_publication_md", source=source))
 
-    spaces = list_spaces(cfg, selected)
-    if not spaces:
-        raise RuntimeError(tr(cfg, "confluence.no_space"))
-    default_space = str(confluence_instances(cfg)[selected].get("default_space") or "")
-    default_idx = next((idx for idx, item in enumerate(spaces) if str(item.get("key")) == default_space), 0)
-    space_id = select_option(
-        tr(cfg, "interactive.space"),
-        [(str(item.get("id")), f"{item.get('key', '')} - {item.get('name', '')}") for item in spaces],
-        default_index=default_idx,
-    )
-    if space_id is None:
-        return
-    space_obj = next(item for item in spaces if str(item.get("id")) == space_id)
-    space_key = str(space_obj.get("key"))
+    space_obj, parent_obj, pages = _select_confluence_location(cfg, selected)
+    space_id = str(space_obj.get("id") or "")
+    space_key = str(space_obj.get("key") or "")
+    parent = str(parent_obj.get("id") or "")
 
     publication_cfg = (cfg.get("confluence") or {}).get("publication") or {}
     configured_mode = str(publication_cfg.get("default_mode") or "replace")
     mode_values = ["replace", "add"]
 
-    def choose_mode(current: str) -> str | None:
-        return select_option(
+    def choose_mode(current: str) -> str:
+        value = select_option(
             tr(cfg, "interactive.publication_mode"),
             [
                 ("replace", tr(cfg, "publication.mode.replace")),
@@ -618,22 +927,17 @@ def _interactive_import(cfg: dict) -> None:
             ],
             default_index=mode_values.index(current) if current in mode_values else 0,
         )
+        if value is None:
+            raise UserCancelled()
+        return str(value)
 
     mode = choose_mode(configured_mode)
-    if mode is None:
-        return
 
-    pages = list_root_pages(cfg, selected, str(space_id))
-    if not pages:
-        raise RuntimeError(f"Aucune page racine trouvée pour l'espace {space_key}.")
-    instance_cfg = confluence_instances(cfg)[selected]
-    default_parent = str(instance_cfg.get("root_page") or space_obj.get("homepageId") or "")
-
-    def choose_parent(current: str) -> str | None:
+    def choose_parent(current: str) -> str:
         default_parent_idx = next(
             (idx for idx, item in enumerate(pages) if str(item.get("id") or "") == current), 0
         )
-        return select_option(
+        value = select_option(
             tr(cfg, "interactive.parent_select"),
             [
                 (
@@ -644,21 +948,20 @@ def _interactive_import(cfg: dict) -> None:
             ],
             default_index=default_parent_idx,
         )
-
-    parent = choose_parent(default_parent)
-    if parent is None:
-        return
+        if value is None:
+            raise UserCancelled()
+        return str(value)
 
     title_override: str | None = None
     if len(md_files) == 1:
         suggested_title = publication_title(md_files[0], cfg)
         if mode == "add":
             suggested_title = suggest_add_title(
-                cfg, instance_name=selected, space_id=str(space_id), requested=suggested_title
+                cfg, instance_name=selected, space_id=space_id, requested=suggested_title
             )
         title_override = edit_text(tr(cfg, "interactive.page_title_edit"), suggested_title)
         if not title_override:
-            raise RuntimeError("Le titre de page Confluence ne peut pas être vide.")
+            raise RuntimeError(tr(cfg, "confluence.empty_title"))
 
     while True:
         parent_obj = next((item for item in pages if str(item.get("id") or "") == str(parent)), None)
@@ -667,14 +970,14 @@ def _interactive_import(cfg: dict) -> None:
         summary = Table(title=tr(cfg, "interactive.publication_action"))
         summary.add_column(tr(cfg, "common.parameter"))
         summary.add_column(tr(cfg, "common.value"))
-        summary.add_row("Instance", selected)
+        summary.add_row(tr(cfg, "interactive.instance"), selected)
         summary.add_row(tr(cfg, "common.space"), f"{space_key} - {space_obj.get('name', '')}")
-        summary.add_row("Mode", tr(cfg, f"publication.mode.{mode}"))
-        summary.add_row("Parent", f"{parent_label} (ID {parent})")
+        summary.add_row(tr(cfg, "interactive.publication_mode"), tr(cfg, f"publication.mode.{mode}"))
+        summary.add_row(tr(cfg, "interactive.parent_select"), f"{parent_label} (ID {parent})")
         if title_override is not None:
             summary.add_row(tr(cfg, "common.title"), title_override)
         elif len(md_files) > 1:
-            summary.add_row(tr(cfg, "common.title"), f"{len(md_files)} pages")
+            summary.add_row(tr(cfg, "common.title"), str(len(md_files)))
         console.print(summary)
 
         action = select_option(
@@ -689,26 +992,22 @@ def _interactive_import(cfg: dict) -> None:
             default_index=0,
         )
         if action in (None, "cancel"):
-            return
+            raise UserCancelled()
         if action == "title":
             if len(md_files) != 1:
-                console.print("[yellow]Le titre global n'est disponible que pour une publication d'une page.[/yellow]")
+                console.print(f"[yellow]{tr(cfg, 'confluence.global_title_single')}[/yellow]")
                 continue
             title_override = edit_text(tr(cfg, "interactive.page_title_edit"), title_override or publication_title(md_files[0], cfg))
             continue
         if action == "parent":
-            selected_parent = choose_parent(str(parent))
-            if selected_parent is not None:
-                parent = selected_parent
+            parent = choose_parent(str(parent))
             continue
         if action == "mode":
-            selected_mode = choose_mode(mode)
-            if selected_mode is not None:
-                mode = selected_mode
-                if len(md_files) == 1 and mode == "add" and title_override:
-                    title_override = suggest_add_title(
-                        cfg, instance_name=selected, space_id=str(space_id), requested=title_override
-                    )
+            mode = choose_mode(mode)
+            if len(md_files) == 1 and mode == "add" and title_override:
+                title_override = suggest_add_title(
+                    cfg, instance_name=selected, space_id=space_id, requested=title_override
+                )
             continue
         if action == "publish":
             break
@@ -770,15 +1069,13 @@ def _confluence_menu(cfg: dict) -> None:
             if choice == "import":
                 _interactive_import(cfg)
             elif choice == "export":
-                selected = _select_instance(cfg)
-                page_id = Prompt.ask(tr(cfg, "interactive.page_id")).strip()
-                if page_id:
-                    package = export_page_to_package(cfg, page_id, Path(cfg["app"]["destination"]), instance_name=selected)
-                    console.print(f"[green]{tr(cfg, 'confluence.export_done', package=package)}[/green]")
+                _interactive_extract_confluence(cfg)
             elif choice == "spaces":
                 _interactive_spaces(cfg)
             elif choice == "roots":
                 _interactive_roots(cfg)
+        except UserCancelled:
+            _cancelled(cfg)
         except Exception as exc:
             console.print(f"[red]{tr(cfg, 'common.error')}: {exc}[/red]")
 
@@ -787,26 +1084,27 @@ def _interactive_doc2wiki(cfg: dict) -> None:
     source = Path(str(cfg["app"]["source"]))
     dest = Path(str(cfg["app"]["destination"]))
     selected = _select_instance(cfg)
-    instance = confluence_instances(cfg)[selected]
+    space_obj, parent_obj, _ = _select_confluence_location(cfg, selected)
+    space_key = str(space_obj.get("key") or "")
+    parent = str(parent_obj.get("id") or "")
     console.print(
-        f"[cyan]Doc2Wiki[/cyan] source={source} -> work={dest} -> "
-        f"{selected}/{instance.get('default_space') or '(space non défini)'} "
-        f"parent={instance.get('root_page') or '(accueil espace)'}"
+        f"[cyan]Doc2Wiki[/cyan] {tr(cfg, 'interactive.source')}={source} -> "
+        f"{tr(cfg, 'interactive.destination')}={dest} -> {selected}/{space_key} parent={parent}"
     )
     confirm = select_option(tr(cfg, "interactive.confirm"), [(True, tr(cfg, "common.yes")), (False, tr(cfg, "common.no"))], default_index=0)
     if confirm is not True:
-        return
+        raise UserCancelled()
     outcomes = run_extract(cfg, source, dest)
     good = [item for item in outcomes if not item.error]
     started = time.perf_counter()
     try:
         with console.status(tr(cfg, "confluence.publish_progress", instance=selected), spinner="dots"):
             if bool(cfg.get("confluence", {}).get("keep_hierarchy", False)):
-                published_count = len(publish(cfg, dest, instance_name=selected, keep_hierarchy=True))
+                published_count = len(publish(cfg, dest, instance_name=selected, space_key=space_key, root_page=parent, keep_hierarchy=True))
             else:
                 published_count = 0
                 for item in good:
-                    published_count += len(publish(cfg, item.package_dir, instance_name=selected, keep_hierarchy=False))
+                    published_count += len(publish(cfg, item.package_dir, instance_name=selected, space_key=space_key, root_page=parent, keep_hierarchy=False))
     except Exception as exc:
         duration = time.perf_counter() - started
         console.print(f"[red]{tr(cfg, 'confluence.publish_failed', duration=duration, error=exc)}[/red]")
@@ -821,10 +1119,10 @@ def _interactive_doc2rag(cfg: dict) -> None:
     dest = Path(str(cfg["app"]["destination"]))
     rag_cfg = cfg.get("rag_export") or {}
     rag_dest = Path(str(rag_cfg.get("destination") or "./rag"))
-    console.print(f"[cyan]Doc2RAG[/cyan] source={source} -> work={dest} -> corpus={rag_dest}")
+    console.print(f"[cyan]Doc2RAG[/cyan] {tr(cfg, 'interactive.source')}={source} -> {tr(cfg, 'interactive.destination')}={dest} -> {rag_dest}")
     confirm = select_option(tr(cfg, "interactive.confirm"), [(True, tr(cfg, "common.yes")), (False, tr(cfg, "common.no"))], default_index=0)
     if confirm is not True:
-        return
+        raise UserCancelled()
     outcomes = run_extract(cfg, source, dest)
     good = [item for item in outcomes if not item.error]
     result = export_rag_corpus(
@@ -835,7 +1133,6 @@ def _interactive_doc2rag(cfg: dict) -> None:
     )
     _batch_report(rag_dest / "doc2rag-report.json", "doc2rag", outcomes, rag_documents=result.document_count, chunks=result.chunk_count)
     console.print(f"[green]{tr(cfg, 'rag.doc2rag_done', documents=result.document_count, chunks=result.chunk_count, destination=rag_dest)}[/green]")
-
 
 
 def _interactive_jira(cfg: dict) -> None:
@@ -850,25 +1147,17 @@ def _interactive_jira(cfg: dict) -> None:
         )
         if choice in (None, "back"):
             return
-        if choice == "export":
-            issue = Prompt.ask(tr(cfg, "interactive.issue")).strip()
-            if issue:
-                package = export_issue(cfg, issue, Path(cfg["app"]["destination"]))
-                console.print(f"[green]{tr(cfg, 'jira.export_done', package=package)}[/green]")
-        elif choice == "create":
-            source = Path(Prompt.ask(tr(cfg, "interactive.markdown_source"))).expanduser()
-            project = Prompt.ask(tr(cfg, "interactive.project")).strip()
-            issue_type = Prompt.ask(tr(cfg, "interactive.issue_type"), default="Story").strip()
-            summary = Prompt.ask(tr(cfg, "interactive.summary"), default="").strip() or None
-            parent = Prompt.ask(tr(cfg, "interactive.jira_parent"), default="").strip() or None
-            result = create_issue_from_markdown(
-                cfg, source, project=project, issue_type=issue_type, summary=summary, parent=parent
-            )
-            console.print(f"[green]{tr(cfg, 'jira.create_done', key=result.get('key', result.get('id', '')))}[/green]")
+        try:
+            if choice == "export":
+                _interactive_extract_jira(cfg)
+            elif choice == "create":
+                _interactive_import_jira(cfg)
+        except UserCancelled:
+            _cancelled(cfg)
 
 
 def _interactive_web(cfg: dict) -> None:
-    url = Prompt.ask(tr(cfg, "interactive.url")).strip()
+    url = prompt_text(tr(cfg, "interactive.url"), "").strip()
     if not url:
         return
     from urllib.parse import urlparse
@@ -887,15 +1176,160 @@ def _interactive_web(cfg: dict) -> None:
     )
     console.print(f"[green]{tr(cfg, 'html.export_done', package=package)}[/green]")
 
+
+def _interactive_extract_confluence(cfg: dict) -> None:
+    selected = _select_instance(cfg)
+    _, page_obj, _ = _select_confluence_location(cfg, selected)
+    page_id = str(page_obj.get("id") or "")
+    attachment_mode = select_option(
+        tr(cfg, "interactive.attachment_mode"),
+        [
+            ("all", tr(cfg, "interactive.attach_all")),
+            ("images", tr(cfg, "interactive.attach_images")),
+            ("none", tr(cfg, "interactive.attach_none")),
+        ],
+        default_index=0,
+    )
+    if attachment_mode is None:
+        raise UserCancelled()
+    zip_package = select_option(
+        tr(cfg, "interactive.zip_package"),
+        [(False, tr(cfg, "common.no")), (True, tr(cfg, "common.yes"))],
+        default_index=0,
+    )
+    if zip_package is None:
+        raise UserCancelled()
+    package = export_page_to_package(
+        cfg, page_id, Path(cfg["app"]["destination"]), instance_name=selected,
+        attachment_mode=str(attachment_mode), zip_package=bool(zip_package),
+    )
+    console.print(f"[green]{tr(cfg, 'confluence.export_done', package=package)}[/green]")
+
+
+def _interactive_extract_jira(cfg: dict) -> None:
+    selected = _select_jira_instance(cfg)
+    mode = select_option(
+        tr(cfg, "jira.discovery.mode_title"),
+        [
+            ("manual", tr(cfg, "jira.discovery.mode_manual")),
+            ("browse", tr(cfg, "jira.discovery.mode_browse")),
+        ],
+        default_index=1,
+    )
+    if mode is None:
+        raise UserCancelled()
+
+    if mode == "manual":
+        issue = prompt_text(tr(cfg, "jira.discovery.manual_prompt"), "").strip()
+        if not issue:
+            raise UserCancelled()
+    else:
+        project = _select_jira_project(cfg, selected)
+        project_key = str(project.get("key") or project.get("id") or "")
+        issue_type = _select_jira_issue_type(cfg, selected, project_key)
+        issue = _select_jira_issue(cfg, selected, project_key, issue_type)
+
+    package = export_issue(cfg, issue, Path(cfg["app"]["destination"]), instance_name=selected)
+    console.print(f"[green]{tr(cfg, 'jira.export_done', package=package)}[/green]")
+
+
+def _extract_menu(cfg: dict) -> None:
+    while True:
+        choice = select_option(
+            tr(cfg, "extract.title"),
+            [
+                ("local", tr(cfg, "extract.local")),
+                ("confluence", tr(cfg, "extract.confluence")),
+                ("jira", tr(cfg, "extract.jira")),
+                ("web", tr(cfg, "extract.web")),
+                ("back", tr(cfg, "common.back")),
+            ],
+        )
+        if choice in (None, "back"):
+            return
+        try:
+            if choice == "local":
+                _interactive_extract(cfg)
+            elif choice == "confluence":
+                _interactive_extract_confluence(cfg)
+            elif choice == "jira":
+                _interactive_extract_jira(cfg)
+            elif choice == "web":
+                _interactive_web(cfg)
+        except UserCancelled:
+            _cancelled(cfg)
+        except Exception as exc:
+            console.print(f"[red]{tr(cfg, 'common.error')}: {exc}[/red]")
+
+
+def _interactive_import_jira(cfg: dict) -> None:
+    selected = _select_jira_instance(cfg)
+    source = Path(prompt_text(tr(cfg, "interactive.package_jira"), str(cfg["app"]["destination"]))).expanduser()
+    project = _select_jira_project(cfg, selected, ask_filter=True)
+    project_key = str(project.get("key") or project.get("id") or "")
+    issue_type = _select_jira_issue_type(cfg, selected, project_key)
+    summary = prompt_text(tr(cfg, "interactive.summary_default"), "").strip() or None
+    parent = prompt_text(tr(cfg, "interactive.parent_optional"), "").strip() or None
+    result = create_issue_from_markdown(
+        cfg, source, project=project_key, issue_type=issue_type, summary=summary, parent=parent, instance_name=selected
+    )
+    console.print(f"[green]Jira: {result.get('key', result.get('id', ''))}[/green]")
+    console.print(f"[dim]state: {result.get('state', '')}[/dim]")
+
+
+def _import_menu(cfg: dict) -> None:
+    while True:
+        choice = select_option(
+            tr(cfg, "import.title"),
+            [("confluence", tr(cfg, "import.confluence")), ("jira", tr(cfg, "import.jira")), ("back", tr(cfg, "common.back"))],
+        )
+        if choice in (None, "back"):
+            return
+        try:
+            if choice == "confluence":
+                _interactive_import(cfg)
+            elif choice == "jira":
+                _interactive_import_jira(cfg)
+        except UserCancelled:
+            _cancelled(cfg)
+        except Exception as exc:
+            console.print(f"[red]{tr(cfg, 'common.error')}: {exc}[/red]")
+
+
+def _rag_menu(cfg: dict) -> None:
+    while True:
+        choice = select_option(
+            tr(cfg, "rag.title"),
+            [("export", tr(cfg, "rag.export_existing")), ("doc2rag", tr(cfg, "rag.extract_export")), ("back", tr(cfg, "common.back"))],
+        )
+        if choice in (None, "back"):
+            return
+        try:
+            if choice == "doc2rag":
+                _interactive_doc2rag(cfg)
+            elif choice == "export":
+                source = Path(prompt_text(tr(cfg, "rag.source_packages"), str(cfg["app"]["destination"])))
+                rag_cfg = cfg.get("rag_export") or {}
+                dest = Path(prompt_text(tr(cfg, "rag.destination"), str(rag_cfg.get("destination") or "./rag")))
+                result = export_rag_corpus(
+                    source, dest, copy_assets=bool(rag_cfg.get("copy_assets", True)),
+                    copy_document_json=bool(rag_cfg.get("copy_document_json", True)), overwrite=bool(rag_cfg.get("overwrite", True)),
+                )
+                console.print(f"[green]{result.document_count} document(s), {result.chunk_count} chunk(s) -> {dest}[/green]")
+        except UserCancelled:
+            _cancelled(cfg)
+        except Exception as exc:
+            console.print(f"[red]{tr(cfg, 'common.error')}: {exc}[/red]")
+
 def _help(cfg: dict) -> None:
     lang = config_language(cfg)
     text_by_lang = {
         "fr": """[bold]DocSpecBridge permet de :[/bold]
 
 • Paramétrer la langue, les répertoires, les profils RAG/publication et plusieurs instances Confluence Cloud.
-• Extraire DOCX, PDF et PPTX en package autonome : Markdown publication, RAG, chunks, JSON et images.
+• Extract : DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence et Jira vers des packages canoniques/Markdown autonomes.
 • Préserver autant que possible la taille d'affichage des images et diagnostiquer le vectoriel.
-• Publier le Markdown dans Confluence Cloud avec images inline.
+• Import : publier un package vers Confluence Cloud ou Jira, avec images/pièces jointes et reprise sur état partiel.
 • Lister les espaces et pages racines Confluence et mémoriser un espace/page par défaut.
 • Utiliser aussi les commandes CLI : extract, publish, doc2wiki, doc2rag, rag-export, spaces, root-pages, config, doctor.
 • Doc2Wiki enchaîne extraction + publication ; Doc2RAG enchaîne extraction + export d'un corpus RAG portable.
@@ -905,9 +1339,9 @@ Dans les listes : ↑/↓ pour naviguer, Entrée pour choisir, Esc pour revenir.
         "en": """[bold]DocSpecBridge can:[/bold]
 
 • Configure language, working directories, RAG/publication profiles and multiple Confluence Cloud instances.
-• Extract DOCX, PDF and PPTX into self-contained publication/RAG packages.
+• Extract DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence and Jira into self-contained canonical/Markdown packages.
 • Preserve image display size when possible and diagnose vector graphics.
-• Publish Markdown to Confluence Cloud with inline images.
+• Import packages into Confluence Cloud or Jira, including images/attachments and resumable publication state.
 • List Confluence spaces/root pages and save defaults.
 • Use CLI commands: extract, publish, doc2wiki, doc2rag, rag-export, spaces, root-pages, config, doctor.
 • Doc2Wiki chains extraction + publishing; Doc2RAG chains extraction + portable RAG corpus export.
@@ -948,23 +1382,20 @@ def menu() -> None:
     config_path = selected_config_path()
     if not config_path.exists():
         init_config(config_path)
-    cfg = load_config(config_path)
+    cfg = _apply_set_overrides(load_config(config_path))
     ensure_workdirs(cfg)
 
     console.print(f"\n[bold cyan]DocSpecBridge {__version__}[/bold cyan]")
     console.print(tr(cfg, "main.subtitle") + "\n")
     while True:
-        cfg = load_config(config_path)  # pick up settings changes immediately
+        cfg = _apply_set_overrides(load_config(config_path))  # pick up settings changes immediately
         choice = select_option(
             f"DocSpecBridge {__version__}",
             [
                 ("settings", tr(cfg, "main.settings")),
-                ("extract", tr(cfg, "main.extract")),
-                ("confluence", tr(cfg, "main.confluence")),
-                ("jira", tr(cfg, "main.jira")),
-                ("web", tr(cfg, "main.web")),
-                ("doc2wiki", tr(cfg, "main.doc2wiki")),
-                ("doc2rag", tr(cfg, "main.doc2rag")),
+                ("extract", tr(cfg, "main.extract_v050")),
+                ("import", tr(cfg, "main.import_v050")),
+                ("rag", tr(cfg, "main.rag_v050")),
                 ("help", tr(cfg, "main.help")),
                 ("quit", tr(cfg, "main.quit")),
             ],
@@ -975,19 +1406,15 @@ def menu() -> None:
             if choice == "settings":
                 config_menu(config_path)
             elif choice == "extract":
-                _interactive_extract(cfg)
-            elif choice == "confluence":
-                _confluence_menu(cfg)
-            elif choice == "jira":
-                _interactive_jira(cfg)
-            elif choice == "web":
-                _interactive_web(cfg)
-            elif choice == "doc2wiki":
-                _interactive_doc2wiki(cfg)
-            elif choice == "doc2rag":
-                _interactive_doc2rag(cfg)
+                _extract_menu(cfg)
+            elif choice == "import":
+                _import_menu(cfg)
+            elif choice == "rag":
+                _rag_menu(cfg)
             elif choice == "help":
                 _help(cfg)
+        except UserCancelled:
+            _cancelled(cfg)
         except Exception as exc:
             console.print(f"[red]{tr(cfg, 'common.error')}: {exc}[/red]")
         console.print()

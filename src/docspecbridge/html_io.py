@@ -32,7 +32,7 @@ def _download_remote_images(
     base_url: str,
     package_dir: Path,
     timeout: float = 30.0,
-    user_agent: str = "DocSpecBridge/0.4.2",
+    user_agent: str = "DocSpecBridge/0.5.1",
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
     root = html.fromstring(html_text)
     images_dir = package_dir / "images"
@@ -117,7 +117,7 @@ def canonical_from_html_source(
     source_url: str | None = None
     if _is_url(source_value):
         source_url = source_value
-        headers = {"User-Agent": str(cfg.get("user_agent") or "DocSpecBridge/0.4.2")}
+        headers = {"User-Agent": str(cfg.get("user_agent") or "DocSpecBridge/0.5.1")}
         with httpx.Client(timeout=float(cfg.get("timeout_seconds") or 30), follow_redirects=True, headers=headers) as client:
             response = client.get(source_url)
             response.raise_for_status()
@@ -134,7 +134,7 @@ def canonical_from_html_source(
                 base_url=final_url,
                 package_dir=package_dir,
                 timeout=float(cfg.get("timeout_seconds") or 30),
-                user_agent=str(cfg.get("user_agent") or "DocSpecBridge/0.4.2"),
+                user_agent=str(cfg.get("user_agent") or "DocSpecBridge/0.5.1"),
             )
             warnings.extend(image_warnings)
         source_meta = {"type": "html", "url": final_url, "packaged_file": "source.html" if package_dir is not None else None}

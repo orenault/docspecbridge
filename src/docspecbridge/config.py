@@ -10,12 +10,17 @@ import yaml
 from .i18n import detect_os_language, normalize_language
 
 
+# Source formats supported by the application. This is product capability, not user configuration.
+SUPPORTED_SOURCE_EXTENSIONS: tuple[str, ...] = (
+    ".docx", ".pdf", ".pptx", ".xlsx", ".html", ".htm", ".md", ".markdown",
+)
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
         "language": "auto",
         "source": "./input",
         "destination": "./output",
-        "extensions": [".docx", ".pdf", ".pptx", ".html", ".htm", ".md"],
         "recursive": True,
         "preserve_source_tree": True,
         "copy_source": True,
@@ -121,16 +126,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "download_images": True,
             "copy_local_images": True,
             "timeout_seconds": 30,
-            "user_agent": "DocSpecBridge/0.4.2",
+            "user_agent": "DocSpecBridge/0.5.1",
         },
     },
     "jira": {
         # If empty, Jira commands reuse matching Confluence instance settings.
         "default_instance": "",
         "instances": {},
+        # Per-instance interactive defaults. Credentials may still be inherited from
+        # matching Confluence instances when jira.instances is empty.
+        "defaults": {},
+        "discovery": {
+            # Number of issues shown per interactive discovery page (never loads the whole project).
+            "page_size": 50,
+        },
         "export": {
-            "include_comments": False,
+            "include_comments": True,
             "include_attachments": True,
+            "include_changelog": False,
+            "attachment_mode": "all",
+            "zip_package": False,
+        },
+        "import": {
+            "resume": True,
+            "upload_images": True,
+            "upload_attachments": True,
         },
     },
     "confluence": {
@@ -152,13 +172,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "overwrite_manual_changes": False,
         "comments": "remove",
         # DocSpecBridge keeps publication identity in publication_state.json instead
-        # of mutating render_document.md with a destination-specific page ID.
+        # of mutating generated publication Markdown with a destination-specific page ID.
         "write_page_id_to_markdown": False,
         "publication": {
             "default_mode": "replace",
             "page_title_source": "document_title",
             "add_title_suffix": " ({n})",
             "verify_after_publish": True,
+            # Optional source/package artefacts uploaded after the page itself.
+            # Values: none | source | rendered | all.
+            "attachments": "none",
+            "attachment_zip": False,
+        },
+        "export": {
+            "attachment_mode": "all",
+            "zip_package": False,
         },
         "heading_anchors": True,
         # Fine-grained md2conf converter settings. Diagram renderers are disabled by
@@ -270,6 +298,13 @@ def _migrate_legacy(data: dict[str, Any]) -> dict[str, Any]:
         cf["instances"] = {str(name): _migrate_instance(dict(value or {})) for name, value in instances.items()}
 
     app = data.setdefault("app", {})
+
+    # 0.5.1: supported source formats are application capabilities, not configuration.
+    # Older YAML files may contain app.extensions (including custom lists). Ignore and
+    # remove that legacy key so an old configuration can never hide a newly supported
+    # source format such as XLSX. Ad-hoc filtering remains available through CLI -e.
+    app.pop("extensions", None)
+
     lang = str(app.get("language") or "auto").strip().lower()
     if lang == "sp":
         app["language"] = "es"
@@ -307,11 +342,14 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
 def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     selected = selected_config_path(path)
     selected.parent.mkdir(parents=True, exist_ok=True)
+    persisted = deepcopy(config)
+    persisted.pop("_runtime", None)
+    (persisted.get("app") or {}).pop("extensions", None)
     selected.write_text(
-        yaml.safe_dump(config, allow_unicode=True, sort_keys=False, width=120),
+        yaml.safe_dump(persisted, allow_unicode=True, sort_keys=False, width=120),
         encoding="utf-8",
     )
-    ensure_workdirs(config)
+    ensure_workdirs(persisted)
     return selected
 
 
@@ -327,12 +365,11 @@ def init_config(path: Path | None = None, *, overwrite: bool = False) -> Path:
 def ensure_workdirs(config: dict[str, Any]) -> tuple[Path | None, Path | None]:
     """Create configured working directories when the configured values are directories."""
     app = config.get("app") or {}
-    extensions = {str(item).lower() for item in app.get("extensions") or []}
     source = Path(str(app.get("source") or "./input"))
     destination = Path(str(app.get("destination") or "./output"))
 
     source_dir: Path | None = source
-    if source.suffix.lower() in extensions:
+    if source.suffix.lower() in SUPPORTED_SOURCE_EXTENSIONS:
         source_dir = None
     elif not source.exists():
         source.mkdir(parents=True, exist_ok=True)

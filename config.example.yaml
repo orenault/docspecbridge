@@ -3,13 +3,6 @@ app:
   language: fr
   source: "./input"
   destination: "./output"
-  extensions:
-    - ".docx"
-    - ".pdf"
-    - ".pptx"
-    - ".html"
-    - ".htm"
-    - ".md"
   recursive: true
   preserve_source_tree: true
   copy_source: true
@@ -142,15 +135,24 @@ confluence:
   keep_hierarchy: false
   overwrite_manual_changes: false
   comments: "remove"          # remove | check-open
-  # Kept only for backward-compatible YAML loading. 0.4.2 never mutates render_document.md.
+  # Kept only for backward-compatible YAML loading. 0.5.x never mutates generated publication Markdown.
   write_page_id_to_markdown: false
   heading_anchors: true
 
   publication:
-    default_mode: "replace"            # replace | add
+    default_mode: "replace"             # replace | add
     page_title_source: "document_title" # document_title | filename
     add_title_suffix: " ({n})"
     verify_after_publish: true
+    # Additional files attached to the published page: none | source | rendered | all
+    attachments: "none"
+    # Add a ZIP of the complete package in addition to selected individual files.
+    attachment_zip: false
+
+  export:
+    # Attachments downloaded when Confluence is used as a source: none | images | all
+    attachment_mode: "all"
+    zip_package: false
 
   layout:
     alignment: "center"
@@ -189,12 +191,30 @@ html:
     download_images: true
     copy_local_images: true
     timeout_seconds: 30
-    user_agent: "DocSpecBridge/0.4.2"
+    user_agent: "DocSpecBridge/0.5.1"
 
 jira:
   # Optional. If instances is empty, jira2md/md2jira reuse Confluence instance credentials.
   default_instance: ""
   instances: {}
+  # Optional per-instance defaults selected interactively from Jira.
+  # Example:
+  # defaults:
+  #   production:
+  #     project: DIGOBS
+  #     issue_type: Story
+  defaults: {}
+  discovery:
+    # Interactive issue browser: only one page is loaded at a time.
+    page_size: 50
   export:
-    include_comments: false
+    include_comments: true
     include_attachments: true
+    include_changelog: false
+    attachment_mode: "all"
+    zip_package: false
+  import:
+    # Resume an existing partially-created issue using jira_publication_state.json.
+    resume: true
+    upload_images: true
+    upload_attachments: true

@@ -7,7 +7,10 @@ from docspecbridge.rag import build_rag_markdown, chunk_markdown
 
 def test_default_config():
     cfg = load_config(None)
-    assert ".docx" in cfg["app"]["extensions"]
+    assert "extensions" not in cfg["app"]
+    from docspecbridge.config import SUPPORTED_SOURCE_EXTENSIONS
+    assert ".docx" in SUPPORTED_SOURCE_EXTENSIONS
+    assert ".xlsx" in SUPPORTED_SOURCE_EXTENSIONS
     assert cfg["extract"]["images"]["extract_images"] is True
     assert cfg["profiles"]["publication"]["preserve_image_display_size"] is True
     assert cfg["profiles"]["rag"]["enabled"] is True
@@ -358,10 +361,10 @@ def test_v040_image_display_geometry_keeps_rag_original_and_human_preview_size(t
         publication_profile={"preserve_image_display_size": True, "display_image_directory": "publication_images"},
         rag_profile={"enabled": True, "keep_image_references": True, "chunking": {"enabled": False}},
     )
-    human = (package / "document.md").read_text(encoding="utf-8")
-    rag = (package / "document.rag.md").read_text(encoding="utf-8")
-    html = (package / "document.html").read_text(encoding="utf-8")
-    conf = (package / "render_document.md").read_text(encoding="utf-8")
+    human = (package / "Images.md").read_text(encoding="utf-8")
+    rag = (package / "Images.rag.md").read_text(encoding="utf-8")
+    html = (package / "Images.html").read_text(encoding="utf-8")
+    conf = (package / "Images.confluence.md").read_text(encoding="utf-8")
     assert "publication_images/icon__w24_h24.png" in human
     assert "images/icon.png" in rag
     assert 'width="24"' in html and 'height="24"' in html
@@ -384,7 +387,7 @@ def test_v041_render_document_is_at_package_root(tmp_path):
     (tmp_path / "images" / "sample.png").write_bytes(b"x")
     outputs = write_canonical_package(doc, tmp_path, rag_profile={"enabled": False})
     render = outputs["confluence_markdown"]
-    assert render == tmp_path / "render_document.md"
+    assert render == tmp_path / "sample.confluence.md"
     text = render.read_text(encoding="utf-8")
     assert 'src="images/sample.png"' in text
     assert '../images/' not in text
@@ -557,3 +560,416 @@ def test_v042_publication_state_separates_primary_and_add_copy(tmp_path):
     assert primary["page_id"] == "100"
     assert {item["role"] for item in state["confluence"]} == {"primary", "copy"}
     assert len(state["confluence"]) == 2
+
+
+
+def test_v050_source_named_outputs_and_legacy_resolution(tmp_path):
+    import json
+    from docspecbridge.package_io import write_canonical_package, resolve_package_output
+
+    doc = {"schema_version": "1.0", "title": "Specification", "source": {"type": "test"}, "blocks": [], "assets": [], "diagnostics": {"warnings": []}}
+    outputs = write_canonical_package(doc, tmp_path, stem="specification", rag_profile={"enabled": True, "chunking": {"enabled": False}})
+    assert outputs["human_markdown"].name == "specification.md"
+    assert outputs["document_json"].name == "specification.json"
+    assert outputs["html"].name == "specification.html"
+    assert outputs["rag_markdown"].name == "specification.rag.md"
+    assert outputs["confluence_markdown"].name == "specification.confluence.md"
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == "0.5"
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "document.json").write_text("{}", encoding="utf-8")
+    assert resolve_package_output(legacy, "document_json", "document.json") == legacy / "document.json"
+
+
+def test_v050_adf_external_media_keeps_image_position():
+    from docspecbridge.adf import canonical_to_adf
+    doc = {
+        "blocks": [
+            {"type": "paragraph", "inlines": [{"type": "text", "text": "before", "marks": []}]},
+            {"type": "image", "src": "images/a.png", "alt": "A", "width": 320, "height": 200},
+            {"type": "paragraph", "inlines": [{"type": "text", "text": "after", "marks": []}]},
+        ]
+    }
+    adf = canonical_to_adf(doc, {"images/a.png": "https://example.atlassian.net/rest/api/3/attachment/content/1"})
+    assert [node["type"] for node in adf["content"]] == ["paragraph", "mediaSingle", "paragraph"]
+    media = adf["content"][1]["content"][0]["attrs"]
+    assert media["type"] == "external"
+    assert media["width"] == 320
+
+
+def test_v050_xlsx_extracts_sheets_formulas_and_chart_preview(tmp_path):
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, Reference
+    from docspecbridge.config import load_config
+    from docspecbridge.xlsx_io import extract_xlsx_to_package
+
+    source = tmp_path / "budget.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Budget"
+    ws.append(["Month", "Amount"])
+    ws.append(["Jan", 10])
+    ws.append(["Feb", 20])
+    ws["B4"] = "=SUM(B2:B3)"
+    chart = BarChart()
+    chart.title = "Amounts"
+    chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=3), titles_from_data=True)
+    chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=3))
+    ws.add_chart(chart, "D2")
+    wb.create_sheet("Notes")["A1"] = "hello"
+    wb.save(source)
+
+    package = tmp_path / "out" / "budget__xlsx"
+    package.mkdir(parents=True)
+    result = extract_xlsx_to_package(source, package, load_config(None))
+    assert (package / "budget.md").is_file()
+    assert len(result["children"]) == 2
+    first = package / result["children"][0]["package"]
+    assert (first / "Budget.md").is_file()
+    assert list((first / "images").glob("chart_*.svg"))
+    meta = result["metadata"]["sheets"][0]
+    assert any(x["cell"] == "B4" and x["formula"].startswith("=") for x in meta["formulas"])
+
+
+def test_v050_config_has_jira_resume_and_confluence_attachment_modes():
+    from docspecbridge.config import load_config
+    cfg = load_config(None)
+    assert cfg["jira"]["import"]["resume"] is True
+    assert cfg["jira"]["export"]["include_comments"] is True
+    assert cfg["confluence"]["publication"]["attachments"] == "none"
+    assert cfg["confluence"]["export"]["attachment_mode"] == "all"
+
+
+def test_cli_version_option():
+    from typer.testing import CliRunner
+    from docspecbridge.cli import app
+
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "DocSpecBridge 0.5.1"
+
+    short = CliRunner().invoke(app, ["-V"])
+    assert short.exit_code == 0
+    assert short.stdout.strip() == "DocSpecBridge 0.5.1"
+
+
+def test_v050_all_new_interactive_menu_labels_are_localized():
+    from docspecbridge.i18n import SUPPORTED_LANGUAGES, tr
+
+    keys = [
+        "main.extract_v050", "main.import_v050", "extract.title", "extract.local",
+        "extract.confluence", "extract.jira", "import.title", "import.confluence",
+        "import.jira", "rag.export_existing", "interactive.space_select",
+        "interactive.page_select", "interactive.project_select", "interactive.issue_type_select",
+        "jira.settings", "jira.settings.default_project", "jira.settings.default_issue_type",
+        "interactive.cancelled",
+    ]
+    for lang in SUPPORTED_LANGUAGES:
+        cfg = load_config(None)
+        cfg["app"]["language"] = lang
+        for key in keys:
+            value = tr(cfg, key)
+            assert value != key
+            assert value.strip()
+
+
+def test_v050_jira_instances_merge_confluence_and_jira_overrides():
+    from docspecbridge.jira import jira_instances
+
+    cfg = load_config(None)
+    cfg["confluence"]["instances"] = {
+        "prod": {"domain": "prod.atlassian.net", "user_name": "a@example.com"},
+        "sandbox": {"domain": "sandbox.atlassian.net", "user_name": "a@example.com"},
+    }
+    cfg["jira"]["instances"] = {
+        "prod": {"domain": "jira-prod.atlassian.net", "user_name": "b@example.com"},
+        "jira-only": {"domain": "jira-only.atlassian.net", "user_name": "b@example.com"},
+    }
+    instances = jira_instances(cfg)
+    assert set(instances) == {"prod", "sandbox", "jira-only"}
+    assert instances["prod"]["domain"] == "jira-prod.atlassian.net"
+    assert instances["sandbox"]["domain"] == "sandbox.atlassian.net"
+
+
+def test_v050_default_config_has_jira_interactive_defaults():
+    cfg = load_config(None)
+    assert "defaults" in cfg["jira"]
+    assert cfg["jira"]["defaults"] == {}
+
+
+def test_v050_confluence_location_discovery_keeps_defaults_visible(monkeypatch):
+    import docspecbridge.cli as cli
+
+    cfg = load_config(None)
+    cfg["confluence"]["instances"] = {
+        "prod": {"default_space": "B", "root_page": "22"}
+    }
+    cfg["confluence"]["default_instance"] = "prod"
+    monkeypatch.setattr(cli, "list_spaces", lambda cfg, instance: [
+        {"id": "1", "key": "A", "name": "Alpha", "homepageId": "11"},
+        {"id": "2", "key": "B", "name": "Beta", "homepageId": "21"},
+    ])
+    monkeypatch.setattr(cli, "list_root_pages", lambda cfg, instance, sid, max_depth=0: [
+        {"id": "21", "title": "Home", "tree_label": "Home"},
+        {"id": "22", "title": "Root", "tree_label": "Root"},
+    ])
+    seen = []
+
+    def fake_select(title, options, default_index=0, **kwargs):
+        opts = list(options)
+        seen.append((title, default_index, opts))
+        return opts[default_index][0]
+
+    monkeypatch.setattr(cli, "select_option", fake_select)
+    space, page, _ = cli._select_confluence_location(cfg, "prod")
+    assert space["key"] == "B"
+    assert page["id"] == "22"
+    assert seen[0][1] == 1  # default space B is highlighted, not bypassed
+    assert seen[1][1] == 1  # default root page 22 is highlighted, not bypassed
+
+
+def test_v050_jira_project_discovery_uses_configured_default(monkeypatch):
+    import docspecbridge.cli as cli
+
+    cfg = load_config(None)
+    cfg["jira"]["defaults"] = {"prod": {"project": "B"}}
+    monkeypatch.setattr(cli, "list_projects", lambda cfg, instance, query=None: [
+        {"id": "1", "key": "A", "name": "Alpha"},
+        {"id": "2", "key": "B", "name": "Beta"},
+    ])
+    seen = {}
+
+    def fake_select(title, options, default_index=0, **kwargs):
+        opts = list(options)
+        seen["default_index"] = default_index
+        return opts[default_index][0]
+
+    monkeypatch.setattr(cli, "select_option", fake_select)
+    project = cli._select_jira_project(cfg, "prod")
+    assert project["key"] == "B"
+    assert seen["default_index"] == 1
+
+
+def test_v050_interactive_prompts_use_escape_aware_ui_layer():
+    from pathlib import Path
+    root = Path(__file__).parent / "src" / "docspecbridge"
+    assert "Prompt.ask" not in (root / "cli.py").read_text(encoding="utf-8")
+    assert "Prompt.ask" not in (root / "config_ui.py").read_text(encoding="utf-8")
+
+
+def test_v050_jira_discovery_default_page_size():
+    cfg = load_config(None)
+    assert cfg["jira"]["discovery"]["page_size"] == 50
+
+
+def test_v050_jira_discovery_labels_are_localized():
+    from docspecbridge.i18n import SUPPORTED_LANGUAGES, tr
+    keys = [
+        "jira.discovery.title", "jira.discovery.search", "jira.discovery.reset",
+        "jira.discovery.manual", "jira.discovery.next", "jira.discovery.search_prompt",
+        "jira.discovery.manual_prompt", "jira.discovery.mode_title",
+        "jira.discovery.mode_manual", "jira.discovery.mode_browse", "jira.discovery.title_typed",
+    ]
+    for lang in SUPPORTED_LANGUAGES:
+        cfg = load_config(None)
+        cfg["app"]["language"] = lang
+        for key in keys:
+            if key == "jira.discovery.title":
+                assert tr(cfg, key, project="ABC", count=2) != key
+            elif key == "jira.discovery.title_typed":
+                assert tr(cfg, key, project="ABC", issue_type="Story", count=2) != key
+            else:
+                assert tr(cfg, key) != key
+
+
+def test_v050_jira_issue_selector_lists_recent_issues_without_loading_whole_project(monkeypatch):
+    import docspecbridge.cli as cli
+
+    cfg = load_config(None)
+    calls = []
+    monkeypatch.setattr(cli, "list_issues", lambda cfg, project, instance, issue_type=None, query=None, next_page_token=None, max_results=50: (
+        calls.append((project, issue_type, query, next_page_token, max_results)) or {
+            "issues": [{"key": "ABC-2", "fields": {"summary": "Second", "status": {"name": "Open"}, "issuetype": {"name": "Story"}, "updated": "2026-09-20T12:00:00.000+0000"}}],
+            "next_page_token": "NEXT",
+            "is_last": False,
+        }
+    ))
+    monkeypatch.setattr(cli, "select_option", lambda title, options, **kwargs: list(options)[0][0])
+    selected = cli._select_jira_issue(cfg, "prod", "ABC", "Story")
+    assert selected == "ABC-2"
+    assert calls == [("ABC", "Story", None, None, 50)]
+
+
+def test_v050_jira_media_rewrite_matches_adf_alt_filename_and_links():
+    from docspecbridge.jira import _rewrite_downloaded_media
+    doc = {
+        "blocks": [
+            {"type": "image", "src": "media-uuid", "alt": "shot.png", "media": {"id": "media-uuid"}},
+            {"type": "paragraph", "inlines": [{"type": "text", "text": "spec.pdf", "marks": [{"type": "link", "href": "https://example/attachment/spec.pdf"}]}]},
+        ]
+    }
+    attachments = [
+        {"saved": True, "id": "100", "filename": "shot.png", "file": "attachments/shot.png"},
+        {"saved": True, "id": "101", "filename": "spec.pdf", "file": "attachments/spec.pdf"},
+    ]
+    _rewrite_downloaded_media(doc, attachments)
+    assert doc["blocks"][0]["src"] == "attachments/shot.png"
+    assert doc["blocks"][1]["inlines"][0]["marks"][0]["href"] == "attachments/spec.pdf"
+
+
+def test_v050_jira_canonical_contains_comments_and_visible_attachment_section():
+    from docspecbridge.jira import issue_to_canonical
+    issue = {"key": "ABC-1", "fields": {"summary": "Demo", "description": {"type": "doc", "version": 1, "content": []}}}
+    doc = issue_to_canonical(
+        issue,
+        instance_name="prod",
+        comments=[{"author": {"displayName": "Alice"}, "created": "2026-09-20", "body": "Plain comment"}],
+        downloaded_attachments=[
+            {"saved": True, "filename": "shot.png", "mime_type": "image/png", "file": "attachments/shot.png"},
+            {"saved": True, "filename": "spec.pdf", "mime_type": "application/pdf", "file": "attachments/spec.pdf"},
+        ],
+        comments_title="Commentaires",
+        attachments_title="Pièces jointes",
+    )
+    headings = ["".join(i.get("text", "") for i in b.get("inlines", [])) for b in doc["blocks"] if b.get("type") == "heading"]
+    assert "Commentaires" in headings
+    assert "Pièces jointes" in headings
+    assert any(b.get("type") == "paragraph" and any(i.get("text") == "Plain comment" for i in b.get("inlines", [])) for b in doc["blocks"])
+    assert any(b.get("type") == "image" and b.get("src") == "attachments/shot.png" for b in doc["blocks"])
+    assert any(any(m.get("href") == "attachments/spec.pdf" for i in b.get("inlines", []) for m in i.get("marks", [])) for b in doc["blocks"] if b.get("type") == "paragraph")
+
+
+def test_v050_jira_attachment_download_uses_dedicated_content_endpoint(monkeypatch, tmp_path):
+    import docspecbridge.jira as jira
+
+    seen = {}
+    class Response:
+        content = b"payload"
+        def raise_for_status(self): pass
+    class Client:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def get(self, url, params=None):
+            seen["url"] = url
+            seen["params"] = params
+            return Response()
+    monkeypatch.setattr(jira, "_client", lambda instance, timeout=120.0: Client())
+    issue = {"fields": {"attachment": [{"id": "123", "filename": "a.txt", "mimeType": "text/plain", "content": "https://remote.example/file"}]}}
+    assets = jira._download_attachments({"domain": "example.atlassian.net"}, issue, tmp_path)
+    assert seen["url"].endswith("/rest/api/3/attachment/content/123")
+    assert seen["params"] == {"redirect": "false"}
+    assert (tmp_path / "attachments" / "a.txt").read_bytes() == b"payload"
+    assert assets[0]["saved"] is True
+
+
+def test_v050_jira_extract_manual_mode_does_not_discover_project(monkeypatch, tmp_path):
+    import docspecbridge.cli as cli
+    cfg = load_config(None)
+    cfg["app"]["destination"] = str(tmp_path)
+    monkeypatch.setattr(cli, "_select_jira_instance", lambda cfg: "prod")
+    answers = iter(["manual"])
+    monkeypatch.setattr(cli, "select_option", lambda *a, **k: next(answers))
+    monkeypatch.setattr(cli, "prompt_text", lambda *a, **k: "ABC-123")
+    monkeypatch.setattr(cli, "_select_jira_project", lambda *a, **k: (_ for _ in ()).throw(AssertionError("project discovery must not run")))
+    seen = {}
+    monkeypatch.setattr(cli, "export_issue", lambda cfg, issue, destination, instance_name=None: seen.update(issue=issue, instance=instance_name) or destination / "pkg")
+    cli._interactive_extract_jira(cfg)
+    assert seen == {"issue": "ABC-123", "instance": "prod"}
+
+
+def test_v050_jira_extract_browse_selects_type_before_issue_list(monkeypatch, tmp_path):
+    import docspecbridge.cli as cli
+    cfg = load_config(None)
+    cfg["app"]["destination"] = str(tmp_path)
+    monkeypatch.setattr(cli, "_select_jira_instance", lambda cfg: "prod")
+    monkeypatch.setattr(cli, "select_option", lambda *a, **k: "browse")
+    order = []
+    monkeypatch.setattr(cli, "_select_jira_project", lambda *a, **k: order.append("project") or {"key": "ABC"})
+    monkeypatch.setattr(cli, "_select_jira_issue_type", lambda *a, **k: order.append("type") or "Story")
+    monkeypatch.setattr(cli, "_select_jira_issue", lambda cfg, instance, project, issue_type: order.append(("issues", project, issue_type)) or "ABC-2")
+    monkeypatch.setattr(cli, "export_issue", lambda cfg, issue, destination, instance_name=None: destination / "pkg")
+    cli._interactive_extract_jira(cfg)
+    assert order == ["project", "type", ("issues", "ABC", "Story")]
+
+
+def test_v050_jira_list_issues_accepts_issue_type_filter_in_source():
+    from pathlib import Path
+    source = (Path(__file__).parent / "src" / "docspecbridge" / "jira.py").read_text(encoding="utf-8")
+    assert 'issuetype = "{escaped_type}"' in source
+
+
+def test_v051_legacy_extensions_are_removed_from_config(tmp_path):
+    import yaml
+    from docspecbridge.config import load_config
+    cfg_path = tmp_path / "docspecbridge.yaml"
+    cfg_path.write_text(yaml.safe_dump({"app": {"extensions": [".docx", ".pdf"]}}), encoding="utf-8")
+    cfg = load_config(cfg_path)
+    assert "extensions" not in cfg["app"]
+
+
+def test_v051_save_does_not_persist_extensions(tmp_path):
+    import yaml
+    from docspecbridge.config import load_config, save_config
+    cfg_path = tmp_path / "docspecbridge.yaml"
+    cfg_path.write_text(yaml.safe_dump({"app": {"extensions": [".docx"]}}), encoding="utf-8")
+    cfg = load_config(cfg_path)
+    save_config(cfg, cfg_path)
+    saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert "extensions" not in saved["app"]
+
+
+def test_v051_xlsx_is_discovered_even_with_legacy_yaml(tmp_path):
+    import yaml
+    from docspecbridge.config import load_config
+    from docspecbridge.extractor import XbergExtractor
+    source = tmp_path / "input"
+    source.mkdir()
+    (source / "book.xlsx").write_bytes(b"placeholder")
+    cfg_path = tmp_path / "docspecbridge.yaml"
+    cfg_path.write_text(yaml.safe_dump({"app": {"extensions": [".docx", ".pdf"]}}), encoding="utf-8")
+    cfg = load_config(cfg_path)
+    files, _ = XbergExtractor(cfg).discover(source)
+    assert [p.name for p in files] == ["book.xlsx"]
+
+
+def test_v051_cli_extension_filter_is_runtime_only(tmp_path):
+    from docspecbridge.config import load_config
+    from docspecbridge.cli import _runtime_config
+    from docspecbridge.extractor import XbergExtractor
+    source = tmp_path / "input"
+    source.mkdir()
+    (source / "a.pdf").write_bytes(b"pdf")
+    (source / "b.xlsx").write_bytes(b"xlsx")
+    cfg = _runtime_config(load_config(None), extensions=["pdf"])
+    assert "extensions" not in cfg["app"]
+    files, _ = XbergExtractor(cfg).discover(source)
+    assert [p.name for p in files] == ["a.pdf"]
+
+
+def test_v050_jira_comments_merge_platform_embedded_and_jsm(monkeypatch):
+    import docspecbridge.jira as jira
+    cfg = {"jira": {"instances": {"prod": {"domain": "example.atlassian.net", "user_name": "u"}}, "default_instance": "prod"}}
+    issue = {
+        "fields": {
+            "project": {"projectTypeKey": "service_desk"},
+            "comment": {"total": 2, "comments": [{"id": "1", "body": "embedded", "author": {"displayName": "A"}}]},
+        }
+    }
+    monkeypatch.setattr(jira, "get_comments", lambda *a, **k: [{"id": "1", "body": "platform", "author": {"displayName": "A"}}])
+    monkeypatch.setattr(jira, "_jsm_comments", lambda *a, **k: [{"id": "2", "body": "jsm", "author": {"displayName": "B"}}])
+    comments, warnings = jira.collect_comments(cfg, "ABC-1", issue, "prod")
+    assert [c["id"] for c in comments] == ["1", "2"]
+    assert warnings == []
+
+
+def test_v050_jira_comments_warn_when_issue_reports_comments_but_api_returns_none(monkeypatch):
+    import docspecbridge.jira as jira
+    cfg = {"jira": {"instances": {"prod": {"domain": "example.atlassian.net", "user_name": "u"}}, "default_instance": "prod"}}
+    issue = {"fields": {"project": {"projectTypeKey": "software"}, "comment": {"total": 3, "comments": []}}}
+    monkeypatch.setattr(jira, "get_comments", lambda *a, **k: [])
+    monkeypatch.setattr(jira, "_jsm_comments", lambda *a, **k: [])
+    comments, warnings = jira.collect_comments(cfg, "ABC-1", issue, "prod")
+    assert comments == []
+    assert any("reports 3 comment" in warning for warning in warnings)

@@ -767,7 +767,7 @@ def build_docx_publication(
     if suppressed_textboxes:
         warnings.append(
             f"{len(suppressed_textboxes)} texte(s) de zone flottante DrawingML/VML exclu(s) du flux linéaire. "
-            "Les détails restent disponibles dans document.json / manifest.json et l'OOXML source est conservé."
+            "Les détails restent disponibles dans canonical JSON / manifest.json et l'OOXML source est conservé."
         )
 
     content = _serialize_for_md2conf(root)

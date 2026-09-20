@@ -20,6 +20,11 @@ _HOME = "HOME"
 _END = "END"
 _ENTER = "ENTER"
 _ESC = "ESC"
+_CANCEL_SENTINEL = "__DOCSPECBRIDGE_ESCAPE__"
+
+
+class UserCancelled(Exception):
+    """Raised when the user presses Esc during an interactive action."""
 
 
 def _read_key() -> str:
@@ -101,13 +106,7 @@ def select_option(
     allow_escape: bool = True,
     help_text: str | None = None,
 ) -> T | None:
-    """Terminal-size-aware selector with a scrolling viewport.
-
-    The old selector rendered every option. On Windows terminals, once the selected
-    line moved below the visible console, Rich continued updating off-screen and the
-    cursor appeared to disappear. This renderer displays only the window that fits in
-    the current terminal and follows the selection dynamically.
-    """
+    """Terminal-size-aware selector with Esc cancellation."""
     choices = list(options)
     if not choices:
         return None
@@ -127,7 +126,6 @@ def select_option(
                 return choices[int(raw) - 1][0]
 
     def viewport() -> tuple[int, int, int]:
-        # title + range + keyboard help + one safety line for terminals with a prompt
         height = max(8, int(console.size.height or 24))
         visible = max(3, height - 4)
         visible = min(visible, len(choices))
@@ -175,8 +173,6 @@ def select_option(
             elif allow_escape and pressed == _ESC:
                 return None
             else:
-                # Retain the original one-digit shortcut behaviour for compatibility.
-                # Large lists are efficiently navigable with PgUp/PgDn/Home/End.
                 if len(pressed) == 1 and pressed.isdigit():
                     numeric = int(pressed)
                     if 1 <= numeric <= min(9, len(choices)):
@@ -189,19 +185,52 @@ def select_option(
     return selected[0]
 
 
-def edit_text(title: str, default: str = "") -> str:
-    """Edit a pre-filled value in-place.
+def prompt_text(title: str, default: str = "", *, strip: bool = True) -> str:
+    """Prompt for text while making Esc a first-class cancel operation.
 
-    prompt_toolkit gives Windows/Linux/macOS the same behaviour: the proposed value is
-    really present in the editing buffer, so Enter accepts it and normal cursor/edit keys
-    modify it directly. This is intentionally different from Rich's visual `(default)`.
+    In an interactive terminal, Esc immediately aborts the current action by raising
+    :class:`UserCancelled`.  In redirected input, the literal values ``esc``, ``q``
+    and ``quit`` provide the equivalent behaviour for automation/tests.
     """
-    try:
-        from prompt_toolkit import prompt
-
-        return prompt(f"{title}: ", default=str(default or "")).strip()
-    except Exception:
-        # Safe fallback for redirected/non-interactive terminals.
+    if not sys.stdin.isatty():
         shown = str(default or "")
         value = input(f"{title}: {shown}\n> ").strip()
-        return value or shown
+        if value.lower() in {"esc", "q", "quit"}:
+            raise UserCancelled()
+        value = value or shown
+        return value.strip() if strip else value
+
+    try:
+        from prompt_toolkit import prompt
+        from prompt_toolkit.key_binding import KeyBindings
+
+        bindings = KeyBindings()
+
+        @bindings.add("escape")
+        def _cancel(event) -> None:  # pragma: no cover - terminal event loop
+            event.app.exit(result=_CANCEL_SENTINEL)
+
+        @bindings.add("c-c")
+        def _cancel_ctrl_c(event) -> None:  # pragma: no cover - terminal event loop
+            event.app.exit(result=_CANCEL_SENTINEL)
+
+        value = prompt(f"{title}: ", default=str(default or ""), key_bindings=bindings)
+        if value == _CANCEL_SENTINEL:
+            raise UserCancelled()
+        return value.strip() if strip else value
+    except UserCancelled:
+        raise
+    except (EOFError, KeyboardInterrupt):
+        raise UserCancelled()
+    except Exception:
+        shown = str(default or "")
+        value = input(f"{title}: {shown}\n> ").strip()
+        if value.lower() in {"esc", "q", "quit"}:
+            raise UserCancelled()
+        value = value or shown
+        return value.strip() if strip else value
+
+
+def edit_text(title: str, default: str = "") -> str:
+    """Edit a pre-filled value in-place; Esc cancels the current action."""
+    return prompt_text(title, default)
