@@ -434,7 +434,7 @@ def test_v042_publication_defaults():
     assert publication["page_title_source"] == "document_title"
     assert publication["add_title_suffix"] == " ({n})"
     assert publication["verify_after_publish"] is True
-    assert cfg["confluence"]["write_page_id_to_markdown"] is False
+    assert "write_page_id_to_markdown" not in cfg["confluence"]
 
 
 def test_v042_docx_title_detection_prefers_core_title(tmp_path):
@@ -648,11 +648,11 @@ def test_cli_version_option():
 
     result = CliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == "DocSpecBridge 0.5.1"
+    assert result.stdout.strip() == "DocSpecBridge 0.5.4"
 
     short = CliRunner().invoke(app, ["-V"])
     assert short.exit_code == 0
-    assert short.stdout.strip() == "DocSpecBridge 0.5.1"
+    assert short.stdout.strip() == "DocSpecBridge 0.5.4"
 
 
 def test_v050_all_new_interactive_menu_labels_are_localized():
@@ -973,3 +973,362 @@ def test_v050_jira_comments_warn_when_issue_reports_comments_but_api_returns_non
     comments, warnings = jira.collect_comments(cfg, "ABC-1", issue, "prod")
     assert comments == []
     assert any("reports 3 comment" in warning for warning in warnings)
+
+
+
+def test_v052_config_schema_is_persisted_and_old_yaml_is_backed_up(tmp_path):
+    import yaml
+    from docspecbridge.config import CURRENT_CONFIG_SCHEMA_VERSION, load_config
+
+    path = tmp_path / "docspecbridge.yaml"
+    path.write_text(yaml.safe_dump({
+        "app": {"language": "en", "extensions": [".docx"]},
+        "confluence": {"domain": "example.atlassian.net", "user_name": "u@example.com"},
+    }), encoding="utf-8")
+
+    cfg = load_config(path)
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert saved["docspecbridge"]["config_schema_version"] == CURRENT_CONFIG_SCHEMA_VERSION
+    assert saved["docspecbridge"]["last_updated_by"] == "0.5.4"
+    assert "extensions" not in saved["app"]
+    assert saved["confluence"]["instances"]["default"]["domain"] == "example.atlassian.net"
+    info = cfg["_runtime"]["config_migration"]
+    assert Path(info["backup"]).is_file()
+    assert Path(info["backup"]).read_text(encoding="utf-8") != path.read_text(encoding="utf-8")
+
+    # Loading an already-current file must not create another backup.
+    load_config(path)
+    assert not (tmp_path / "docspecbridge.yaml.pre-0.5.4.2.bak").exists()
+
+
+def test_v052_newer_config_schema_is_rejected_without_rewrite(tmp_path):
+    import yaml
+    import pytest
+    from docspecbridge.config import CURRENT_CONFIG_SCHEMA_VERSION, load_config
+
+    path = tmp_path / "docspecbridge.yaml"
+    original = yaml.safe_dump({
+        "docspecbridge": {"config_schema_version": CURRENT_CONFIG_SCHEMA_VERSION + 1, "last_updated_by": "9.9.9"},
+        "app": {"language": "en"},
+    })
+    path.write_text(original, encoding="utf-8")
+    with pytest.raises(RuntimeError) as exc:
+        load_config(path)
+    assert "newer schema" in str(exc.value)
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_v052_force_extract_preserves_and_migrates_publication_states(tmp_path):
+    import hashlib
+    import json
+    from docspecbridge.config import load_config
+    from docspecbridge.extractor import run_extract
+
+    source_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir(); output_dir.mkdir()
+    (source_dir / "spec.md").write_text("# Current title\n\nBody\n", encoding="utf-8")
+    old = output_dir / "spec__md"
+    old.mkdir()
+    (old / "old-generated-file.txt").write_text("old", encoding="utf-8")
+    (old / "publication_state.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "confluence": [{
+            "instance": "prod", "space": "DOC", "parent_id": "100", "page_id": "123456",
+            "title": "Title edited manually in Confluence", "source": "render_document.md", "role": "primary",
+        }],
+    }), encoding="utf-8")
+    (old / "jira_publication_state.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "publications": [{
+            "instance": "prod", "project": "ABC", "issue_type": "Story", "issue_key": "ABC-12",
+            "source_fingerprint": "old-fingerprint", "attachments": {}, "status": "complete",
+        }],
+    }), encoding="utf-8")
+
+    cfg = load_config(None)
+    cfg.setdefault("_runtime", {})["force_extract"] = True
+    cfg["app"]["overwrite"] = False
+    result = run_extract(cfg, source_dir, output_dir)
+    assert len(result) == 1 and result[0].error is None
+    package = output_dir / "spec__md"
+    assert not (package / "old-generated-file.txt").exists()
+
+    cf = json.loads((package / "publication_state.json").read_text(encoding="utf-8"))
+    assert cf["schema_version"] == "1.1"
+    assert cf["confluence"][0]["page_id"] == "123456"
+    assert cf["confluence"][0]["source"] == "spec.confluence.md"
+
+    jira = json.loads((package / "jira_publication_state.json").read_text(encoding="utf-8"))
+    expected = hashlib.sha256((package / "manifest.json").read_bytes()).hexdigest()
+    assert jira["schema_version"] == "1.1"
+    assert jira["publications"][0]["issue_key"] == "ABC-12"
+    assert jira["publications"][0]["source_fingerprint"] == expected
+    assert not list(output_dir.glob(".*.docspecbridge-force-*.bak"))
+
+
+def test_v052_confluence_state_page_id_is_strict_and_does_not_fallback_to_create(monkeypatch, tmp_path):
+    import json
+    import pytest
+    import docspecbridge.confluence as cf
+    from docspecbridge.config import load_config
+
+    package = tmp_path / "spec__docx"
+    package.mkdir()
+    md = package / "spec.confluence.md"
+    md.write_text("# New title\n", encoding="utf-8")
+    (package / "publication_state.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "confluence": [{
+            "instance": "prod", "space": "DOC", "parent_id": "100", "page_id": "123456",
+            "source": "render_document.md", "role": "primary",
+        }],
+    }), encoding="utf-8")
+    monkeypatch.setattr(cf, "_get_page_by_id", lambda *a, **k: None)
+    monkeypatch.setattr(cf, "_find_pages_by_title", lambda *a, **k: (_ for _ in ()).throw(AssertionError("title fallback must not run")))
+    cfg = load_config(None)
+    with pytest.raises(RuntimeError) as exc:
+        cf.prepare_publication_target(
+            cfg, md, instance_name="prod", instance={}, space_key="DOC", space_id="1",
+            parent_id="100", mode="replace", requested_title="New title",
+        )
+    assert "123456" in str(exc.value)
+
+
+def test_v052_i18n_catalogs_have_identical_keys():
+    from docspecbridge.i18n import _TRANSLATIONS, SUPPORTED_LANGUAGES
+    reference = set(_TRANSLATIONS["en"])
+    for lang in SUPPORTED_LANGUAGES:
+        assert set(_TRANSLATIONS[lang]) == reference
+
+
+def test_v052_new_user_facing_keys_exist_in_all_languages():
+    from docspecbridge.i18n import SUPPORTED_LANGUAGES, tr
+    keys = [
+        "cli.opt.force_extract", "extract.force_local", "extract.force_notice",
+        "extract.force_preserved", "extract.force_rollback", "extract.force_state_error",
+        "config.migrated", "config.backup_created", "config.schema_too_new",
+        "publication.state_missing_page_id", "publication.state_page_missing",
+        "publication.state_location_mismatch", "publication.title_conflict",
+    ]
+    for lang in SUPPORTED_LANGUAGES:
+        cfg = {"app": {"language": lang}}
+        for key in keys:
+            value = tr(cfg, key, old=1, new=2, path="x", current=3, supported=2,
+                       source="pkg", page_id="123", space="DOC", parent="1",
+                       title="T", file="state.json", error="E")
+            assert value != key and value.strip()
+
+
+def test_v052_readme_is_release_neutral_and_links_changelog():
+    from pathlib import Path
+    root = Path(__file__).parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "CHANGELOG.md" in readme
+    assert "What changes in 0.5" not in readme
+    assert "## 0.5.4" in changelog
+    assert changelog.index("## 0.5.4") < changelog.index("## 0.5.3") < changelog.index("## 0.5.1") < changelog.index("## 0.5.0")
+
+
+def test_v052_force_extract_rolls_back_on_failed_rebuild(tmp_path, monkeypatch):
+    import asyncio
+    from docspecbridge.config import load_config
+    from docspecbridge.extractor import ExtractionOutcome, XbergExtractor
+
+    source_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir(); output_dir.mkdir()
+    source = source_dir / "spec.md"
+    source.write_text("# New\n", encoding="utf-8")
+    package = output_dir / "spec__md"
+    package.mkdir()
+    (package / "old.txt").write_text("keep me", encoding="utf-8")
+
+    cfg = load_config(None)
+    cfg.setdefault("_runtime", {})["force_extract"] = True
+    extractor = XbergExtractor(cfg)
+
+    async def fail_extract(file, root, destination):
+        partial = destination / "spec__md"
+        partial.mkdir(parents=True, exist_ok=True)
+        (partial / "partial.txt").write_text("bad", encoding="utf-8")
+        return ExtractionOutcome(source=file, package_dir=partial, error="boom")
+
+    monkeypatch.setattr(extractor, "_extract_one", fail_extract)
+    outcome = asyncio.run(extractor._force_extract_one(source, source_dir, output_dir))
+    assert outcome.error == "boom"
+    assert (package / "old.txt").read_text(encoding="utf-8") == "keep me"
+    assert not (package / "partial.txt").exists()
+    assert not list(output_dir.glob(".*.docspecbridge-force-*.bak"))
+
+
+def test_v052_settings_field_catalogs_have_identical_keys():
+    import ast
+    from pathlib import Path
+
+    path = Path(__file__).parent / "src" / "docspecbridge" / "config_ui.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    fields = None
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "_FIELD_TEXT":
+            fields = ast.literal_eval(node.value)
+        elif fields is not None and isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            if isinstance(call.func, ast.Attribute) and call.func.attr == "update" and isinstance(call.func.value, ast.Subscript):
+                sub = call.func.value
+                if isinstance(sub.value, ast.Name) and sub.value.id == "_FIELD_TEXT" and call.args:
+                    try:
+                        lang = ast.literal_eval(sub.slice)
+                        fields[lang].update(ast.literal_eval(call.args[0]))
+                    except Exception:
+                        pass
+    assert fields is not None
+    reference = set(fields["en"])
+    for lang in ("en", "fr", "de", "es", "zh"):
+        assert set(fields[lang]) == reference
+
+
+def test_v053_multisheet_xlsx_landing_page_has_target_specific_navigation(tmp_path):
+    import json
+    from openpyxl import Workbook
+    from docspecbridge.config import load_config
+    from docspecbridge.xlsx_io import extract_xlsx_to_package
+
+    source = tmp_path / "book.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Budget"
+    ws.append(["Month", "Amount"])
+    ws.append(["Jan", 10])
+    notes = wb.create_sheet("Notes")
+    notes["A1"] = "hello"
+    wb.save(source)
+
+    package = tmp_path / "out" / "book__xlsx"
+    package.mkdir(parents=True)
+    result = extract_xlsx_to_package(source, package, load_config(None))
+
+    assert len(result["children"]) == 2
+    md = (package / "book.md").read_text(encoding="utf-8")
+    html = (package / "book.html").read_text(encoding="utf-8")
+    conf = (package / "book.confluence.md").read_text(encoding="utf-8")
+    assert "[Budget](sheets/01-Budget/Budget.md)" in md
+    assert "[Notes](sheets/02-Notes/Notes.md)" in md
+    assert 'href="sheets/01-Budget/Budget.html"' in html
+    assert 'href="sheets/02-Notes/Notes.html"' in html
+    assert "[[_LISTING_]]" in conf
+    manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["xlsx"]["single_sheet"] is False
+    assert [item["title"] for item in manifest["children"]] == ["Budget", "Notes"]
+
+
+def test_v053_single_sheet_xlsx_is_direct_root_page(tmp_path):
+    import json
+    from openpyxl import Workbook
+    from docspecbridge.config import load_config
+    from docspecbridge.xlsx_io import extract_xlsx_to_package
+
+    source = tmp_path / "single.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Name", "Value"])
+    ws.append(["A", 1])
+    wb.save(source)
+
+    package = tmp_path / "out" / "single__xlsx"
+    package.mkdir(parents=True)
+    result = extract_xlsx_to_package(source, package, load_config(None))
+
+    assert result["children"] == []
+    assert not (package / "sheets").exists()
+    md = (package / "single.md").read_text(encoding="utf-8")
+    assert "# Data" in md
+    assert "Name" in md and "Value" in md
+    assert "[[_LISTING_]]" not in (package / "single.confluence.md").read_text(encoding="utf-8")
+    manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["xlsx"]["single_sheet"] is True
+    assert manifest["xlsx"]["worksheet"] == "Data"
+
+
+def test_v053_local_html_in_input_is_extracted_natively(tmp_path):
+    from docspecbridge.config import load_config
+    from docspecbridge.extractor import run_extract
+
+    source = tmp_path / "input"
+    output = tmp_path / "output"
+    source.mkdir(); output.mkdir()
+    (source / "page.html").write_text(
+        "<html><body><main><h1>Local HTML</h1><p>Hello <strong>world</strong>.</p></main></body></html>",
+        encoding="utf-8",
+    )
+    cfg = load_config(None)
+    cfg["app"]["source"] = str(source)
+    cfg["app"]["destination"] = str(output)
+    outcomes = run_extract(cfg, source, output)
+    assert len(outcomes) == 1
+    assert outcomes[0].error is None
+    package = output / "page__html"
+    assert (package / "page.md").is_file()
+    assert (package / "page.html").is_file()
+    assert (package / "page.source.html").is_file()
+    assert "<main>" in (package / "page.source.html").read_text(encoding="utf-8")
+    text = (package / "page.md").read_text(encoding="utf-8")
+    assert "# Local HTML" in text
+    assert "Hello **world**." in text
+
+
+
+def test_v054_markdown_mermaid_becomes_semantic_diagram():
+    from docspecbridge.html_io import canonical_from_markdown
+
+    source = "# Architecture\n\n```mermaid\nflowchart LR\n    A --> B\n```\n\n```python\nprint('ok')\n```\n"
+    doc = canonical_from_markdown(source, title="Architecture", source={"type": "markdown"})
+    diagrams = [block for block in doc["blocks"] if block.get("type") == "diagram"]
+    code = [block for block in doc["blocks"] if block.get("type") == "code_block"]
+    assert len(diagrams) == 1
+    assert diagrams[0]["diagram_type"] == "mermaid"
+    assert diagrams[0]["mermaid"] == "flowchart LR\n    A --> B"
+    assert len(code) == 1
+    assert code[0]["language"] == "python"
+
+
+def test_v054_mermaid_survives_all_package_renderers(tmp_path):
+    import json
+    from docspecbridge.html_io import canonical_from_markdown
+    from docspecbridge.package_io import write_canonical_package
+
+    source = "# Architecture\n\n```Mermaid\nsequenceDiagram\n    Alice->>Bob: Hello\n```\n"
+    doc = canonical_from_markdown(source, title="Architecture", source={"type": "markdown"})
+    outputs = write_canonical_package(
+        doc,
+        tmp_path,
+        stem="architecture",
+        rag_profile={"enabled": True, "chunking": {"enabled": False}},
+    )
+
+    human = outputs["human_markdown"].read_text(encoding="utf-8")
+    rag = outputs["rag_markdown"].read_text(encoding="utf-8")
+    html = outputs["html"].read_text(encoding="utf-8")
+    confluence = outputs["confluence_markdown"].read_text(encoding="utf-8")
+    canonical = json.loads(outputs["document_json"].read_text(encoding="utf-8"))
+
+    assert "```mermaid\nsequenceDiagram" in human
+    assert "```mermaid\nsequenceDiagram" in rag
+    assert '<pre class="mermaid">sequenceDiagram' in html
+    assert "```mermaid\nsequenceDiagram" in confluence
+    assert "<pre><code>sequenceDiagram" not in confluence
+    assert any(block.get("type") == "diagram" for block in canonical["blocks"])
+
+
+def test_v054_mermaid_language_with_trailing_info_is_detected():
+    from docspecbridge.html_io import canonical_from_markdown
+
+    doc = canonical_from_markdown(
+        "```mermaid theme=neutral\ngraph TD\nA-->B\n```\n",
+        title="Diagram",
+        source={"type": "markdown"},
+    )
+    assert doc["blocks"][0]["type"] == "diagram"
+    assert doc["blocks"][0]["mermaid"].startswith("graph TD")

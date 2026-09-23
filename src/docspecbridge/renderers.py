@@ -150,6 +150,16 @@ def _render_block_md(block: dict[str, Any], *, rag: bool) -> str:
             return f"```mermaid\n{mermaid}\n```"
         fallback = str(block.get("fallback_asset") or "")
         return f"![diagram]({fallback})" if fallback else ""
+    if kind == "child_pages":
+        lines: list[str] = []
+        for item in block.get("items") or []:
+            title = _escape_md(str(item.get("title") or ""))
+            href = str(item.get("markdown_href") or "").replace("\\", "/")
+            if title and href:
+                lines.append(f"- [{title}]({href})")
+            elif title:
+                lines.append(f"- {title}")
+        return "\n".join(lines)
     return ""
 
 
@@ -270,6 +280,23 @@ def _blocks_html(blocks: Iterable[dict[str, Any]], *, confluence: bool = False, 
                 out.append("```mermaid\n" + mermaid + "\n```" if confluence else '<pre class="mermaid">' + html.escape(mermaid) + "</pre>")
             elif block.get("fallback_asset"):
                 out.append(f'<p><img src="{html.escape(_asset_src(str(block.get("fallback_asset")), asset_prefix), quote=True)}" alt="diagram"/></p>')
+        elif kind == "child_pages":
+            if confluence:
+                # markdown-to-confluence maps this portable marker to Confluence's
+                # Children Display macro. The macro is intentionally dynamic: after
+                # worksheet pages are created/renamed/reordered, the workbook page
+                # still lists the actual child pages without regenerating links.
+                out.append("[[_LISTING_]]")
+            else:
+                items = []
+                for item in block.get("items") or []:
+                    title = html.escape(str(item.get("title") or ""))
+                    href = html.escape(str(item.get("html_href") or "").replace("\\", "/"), quote=True)
+                    if title and href:
+                        items.append(f'<li><a href="{href}">{title}</a></li>')
+                    elif title:
+                        items.append(f"<li>{title}</li>")
+                out.append('<nav class="child-pages"><ul>' + "".join(items) + "</ul></nav>")
     return "\n".join(out)
 
 

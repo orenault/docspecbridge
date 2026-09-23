@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import binascii
 import mimetypes
 import re
 import shutil
 import hashlib
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from .rag import build_rag_markdown, chunk_markdown, write_chunks_jsonl
 from .utils import json_safe, safe_stem, sha256_file, write_json
 from .canonical import canonical_from_xhtml
 from .html_io import canonical_from_html_source, canonical_from_markdown
+from .i18n import tr
 from .package_io import write_canonical_package
 from .title_detection import apply_detected_title
 from .xlsx_io import extract_xlsx_to_package
@@ -82,8 +85,114 @@ class XbergExtractor:
         files, source_root = self.discover(source)
         outcomes: list[ExtractionOutcome] = []
         for file in files:
-            outcomes.append(await self._extract_one(file, source_root, destination.resolve()))
+            if bool(((self.config.get("_runtime") or {}).get("force_extract", False))):
+                outcomes.append(await self._force_extract_one(file, source_root, destination.resolve()))
+            else:
+                outcomes.append(await self._extract_one(file, source_root, destination.resolve()))
         return outcomes
+
+    async def _force_extract_one(self, source: Path, source_root: Path, destination: Path) -> ExtractionOutcome:
+        """Re-extract a package transactionally while preserving publication identity.
+
+        The existing package is first renamed to a sibling backup. Extraction then runs
+        into the original package path. Only after a successful extraction are Confluence
+        and Jira publication states migrated into the new package and the backup removed.
+        On failure the partial package is discarded and the previous package is restored.
+        """
+        package_dir = self._package_dir(source, source_root, destination)
+        if not package_dir.exists() or not any(package_dir.iterdir()):
+            return await self._extract_one(source, source_root, destination)
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        backup_dir = package_dir.with_name(f".{package_dir.name}.docspecbridge-force-{stamp}.bak")
+        package_dir.rename(backup_dir)
+        try:
+            outcome = await self._extract_one(source, source_root, destination)
+            if outcome.error:
+                if package_dir.exists():
+                    shutil.rmtree(package_dir, ignore_errors=True)
+                backup_dir.rename(package_dir)
+                outcome.package_dir = package_dir
+                outcome.warnings.append(tr(self.config, "extract.force_rollback"))
+                return outcome
+
+            self._restore_publication_states(backup_dir, package_dir)
+            shutil.rmtree(backup_dir, ignore_errors=True)
+            outcome.warnings.append(tr(self.config, "extract.force_preserved"))
+            return outcome
+        except Exception:
+            if package_dir.exists():
+                shutil.rmtree(package_dir, ignore_errors=True)
+            if backup_dir.exists():
+                backup_dir.rename(package_dir)
+            raise
+
+    def _restore_publication_states(self, old_package: Path, new_package: Path) -> None:
+        """Restore/migrate durable target identity for the root and nested packages.
+
+        XLSX workbooks can publish child worksheet packages independently, so every
+        nested state file must survive a force extraction. If an old state cannot be
+        mapped to a regenerated package at the same relative location, fail the whole
+        transaction and restore the previous corpus rather than silently losing identity.
+        """
+        state_paths = sorted(old_package.rglob("publication_state.json"))
+        jira_paths = sorted(old_package.rglob("jira_publication_state.json"))
+
+        for cf_old in state_paths:
+            rel_dir = cf_old.parent.relative_to(old_package)
+            target_package = new_package / rel_dir
+            if not target_package.is_dir():
+                raise RuntimeError(tr(
+                    self.config, "extract.force_missing_nested_package", path=str(rel_dir or Path("."))
+                ))
+            manifest = target_package / "manifest.json"
+            manifest_data: dict[str, Any] = {}
+            if manifest.is_file():
+                try:
+                    manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+                except Exception:
+                    manifest_data = {}
+            publication_name = str((manifest_data.get("outputs") or {}).get("publication_markdown") or "").strip()
+            try:
+                state = json.loads(cf_old.read_text(encoding="utf-8"))
+                if not isinstance(state, dict):
+                    raise ValueError("invalid state")
+                for row in state.get("confluence") or []:
+                    if isinstance(row, dict) and publication_name:
+                        row["source"] = Path(publication_name).name
+                state["schema_version"] = "1.1"
+                state["migrated_by"] = __version__
+                state["migrated_at"] = datetime.now(timezone.utc).isoformat()
+                write_json(target_package / "publication_state.json", state)
+            except Exception as exc:
+                raise RuntimeError(tr(
+                    self.config, "extract.force_state_error", file=str(cf_old.relative_to(old_package)), error=exc
+                )) from exc
+
+        for jira_old in jira_paths:
+            rel_dir = jira_old.parent.relative_to(old_package)
+            target_package = new_package / rel_dir
+            if not target_package.is_dir():
+                raise RuntimeError(tr(
+                    self.config, "extract.force_missing_nested_package", path=str(rel_dir or Path("."))
+                ))
+            manifest = target_package / "manifest.json"
+            try:
+                state = json.loads(jira_old.read_text(encoding="utf-8"))
+                if not isinstance(state, dict):
+                    raise ValueError("invalid state")
+                fingerprint = hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.is_file() else ""
+                for row in state.get("publications") or []:
+                    if isinstance(row, dict) and fingerprint:
+                        row["source_fingerprint"] = fingerprint
+                state["schema_version"] = "1.1"
+                state["migrated_by"] = __version__
+                state["migrated_at"] = datetime.now(timezone.utc).isoformat()
+                write_json(target_package / "jira_publication_state.json", state)
+            except Exception as exc:
+                raise RuntimeError(tr(
+                    self.config, "extract.force_state_error", file=str(jira_old.relative_to(old_package)), error=exc
+                )) from exc
 
     def _package_dir(self, source: Path, source_root: Path, destination: Path) -> Path:
         app = self.config["app"]
@@ -110,7 +219,13 @@ class XbergExtractor:
             images_dir = package_dir / "images"
             images_dir.mkdir(parents=True, exist_ok=True)
 
-            source_copy = package_dir / source.name
+            # Text sources can otherwise collide with generated human outputs
+            # (`page.html` -> generated `page.html`, `notes.md` -> generated `notes.md`).
+            # Preserve the original under an explicit source name instead.
+            if source.suffix.lower() in {".html", ".htm", ".md", ".markdown"}:
+                source_copy = package_dir / f"{safe_stem(source.stem)}.source{source.suffix.lower()}"
+            else:
+                source_copy = package_dir / source.name
             if app_cfg.get("copy_source", True):
                 if source.resolve() != source_copy.resolve():
                     shutil.copy2(source, source_copy)
@@ -142,7 +257,10 @@ class XbergExtractor:
                     text = source.read_text(encoding="utf-8", errors="replace")
                     doc = canonical_from_markdown(
                         text, title=source.stem,
-                        source={"type": "markdown", "original_path": str(source), "extension": source.suffix.lower()},
+                        source={
+                            "type": "markdown", "original_path": str(source), "extension": source.suffix.lower(),
+                            "packaged_file": source_copy.name if app_cfg.get("copy_source", True) else None,
+                        },
                     )
                     apply_detected_title(doc, source)
                 outputs = write_canonical_package(

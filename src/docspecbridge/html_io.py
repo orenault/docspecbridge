@@ -32,7 +32,7 @@ def _download_remote_images(
     base_url: str,
     package_dir: Path,
     timeout: float = 30.0,
-    user_agent: str = "DocSpecBridge/0.5.1",
+    user_agent: str = "DocSpecBridge/0.5.4",
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
     root = html.fromstring(html_text)
     images_dir = package_dir / "images"
@@ -117,7 +117,7 @@ def canonical_from_html_source(
     source_url: str | None = None
     if _is_url(source_value):
         source_url = source_value
-        headers = {"User-Agent": str(cfg.get("user_agent") or "DocSpecBridge/0.5.1")}
+        headers = {"User-Agent": str(cfg.get("user_agent") or "DocSpecBridge/0.5.4")}
         with httpx.Client(timeout=float(cfg.get("timeout_seconds") or 30), follow_redirects=True, headers=headers) as client:
             response = client.get(source_url)
             response.raise_for_status()
@@ -134,7 +134,7 @@ def canonical_from_html_source(
                 base_url=final_url,
                 package_dir=package_dir,
                 timeout=float(cfg.get("timeout_seconds") or 30),
-                user_agent=str(cfg.get("user_agent") or "DocSpecBridge/0.5.1"),
+                user_agent=str(cfg.get("user_agent") or "DocSpecBridge/0.5.4"),
             )
             warnings.extend(image_warnings)
         source_meta = {"type": "html", "url": final_url, "packaged_file": "source.html" if package_dir is not None else None}
@@ -145,7 +145,13 @@ def canonical_from_html_source(
         if package_dir is not None and bool(cfg.get("copy_local_images", True)):
             text, assets, local_warnings = _copy_local_images(text, source_dir=path.parent, package_dir=package_dir)
             warnings.extend(local_warnings)
-        source_meta = {"type": "html", "original_path": str(path), "extension": path.suffix.lower()}
+        packaged_file = None
+        if package_dir is not None:
+            packaged_file = f"{path.stem}.source{path.suffix.lower() or '.html'}"
+        source_meta = {
+            "type": "html", "original_path": str(path), "extension": path.suffix.lower(),
+            "packaged_file": packaged_file,
+        }
         title = None
     doc = canonical_from_html_document(
         text,
@@ -236,7 +242,13 @@ def canonical_from_markdown(markdown: str, *, title: str, source: dict[str, Any]
             while i < len(lines) and not lines[i].strip().startswith("```"):
                 content.append(lines[i]); i += 1
             if i < len(lines): i += 1
-            blocks.append({"type": "code_block", "language": lang, "text": "\n".join(content)}); continue
+            body = "\n".join(content)
+            language = (lang.split(None, 1)[0] if lang else "").casefold()
+            if language == "mermaid":
+                blocks.append({"type": "diagram", "diagram_type": "mermaid", "mermaid": body})
+            else:
+                blocks.append({"type": "code_block", "language": lang, "text": body})
+            continue
         # GFM pipe table: header row + separator.
         if stripped.startswith("|") and i + 1 < len(lines) and re.match(r"^\s*\|?\s*:?-{3,}", lines[i+1]):
             flush_paragraph(); table_lines=[line]; i += 2

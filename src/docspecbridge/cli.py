@@ -37,12 +37,20 @@ from .package_io import write_canonical_package
 from .renderers import render_html
 
 try:
-    _HELP_CONFIG = load_config(None)
+    _HELP_CONFIG = load_config(None, auto_migrate=False)
 except Exception:
     _HELP_CONFIG = {"app": {"language": "auto"}}
 
 def _h(key: str) -> str:
     return tr(_HELP_CONFIG, key)
+
+
+def _show_config_migration(cfg: dict) -> None:
+    info = ((cfg.get("_runtime") or {}).get("config_migration") or {})
+    if not info:
+        return
+    console.print(f"[yellow]{tr(cfg, 'config.migrated', old=info.get('from_schema'), new=info.get('to_schema'))}[/yellow]")
+    console.print(f"[dim]{tr(cfg, 'config.backup_created', path=info.get('backup'))}[/dim]")
 
 app = typer.Typer(add_completion=False, no_args_is_help=False, help=_h("cli.app.help"))
 console = Console()
@@ -80,6 +88,7 @@ def _apply_set_overrides(cfg: dict) -> dict:
 
 def _cfg(config: Optional[Path], *, apply_overrides: bool = True):
     cfg = load_config(config)
+    _show_config_migration(cfg)
     if apply_overrides:
         _apply_set_overrides(cfg)
     ensure_workdirs(cfg)
@@ -165,10 +174,10 @@ def _version_callback(value: bool) -> None:
 def main(
     ctx: typer.Context,
     version: Annotated[Optional[bool], typer.Option(
-        "--version", "-V", callback=_version_callback, is_eager=True, help="Show DocSpecBridge version and exit."
+        "--version", "-V", callback=_version_callback, is_eager=True, help=_h("cli.opt.version")
     )] = None,
     set_value: Annotated[Optional[list[str]], typer.Option(
-        "--set", help="Override any YAML setting: --set dotted.path=value (repeatable; highest precedence)."
+        "--set", help=_h("cli.opt.set")
     )] = None,
 ) -> None:
     """Without a subcommand, open the interactive menu. --set can override every YAML key."""
@@ -188,11 +197,12 @@ def extract(
     overlap: Annotated[Optional[int], typer.Option("--overlap")] = None,
     config: Annotated[Optional[Path], typer.Option("--config", "-c", help=_h("cli.opt.config"))] = None,
     overwrite: Annotated[bool, typer.Option("--overwrite", help=_h("cli.opt.overwrite"))] = False,
+    force_extract: Annotated[bool, typer.Option("--force-extract", help=_h("cli.opt.force_extract"))] = False,
 ) -> None:
     """Extrait DOCX/PDF/PPTX vers publication Markdown + RAG + images."""
     cfg = _runtime_config(
         _cfg(config, apply_overrides=False), recursive=recursive, extensions=extension, overwrite=overwrite,
-        chunk_size=chunk_size, overlap=overlap,
+        force_extract=force_extract, chunk_size=chunk_size, overlap=overlap,
     )
     source = source or Path(cfg["app"]["source"])
     dest = dest or Path(cfg["app"]["destination"])
@@ -297,6 +307,7 @@ def _runtime_config(
     recursive: bool | None = None,
     extensions: list[str] | None = None,
     overwrite: bool = False,
+    force_extract: bool = False,
     keep_hierarchy: bool | None = None,
     comments: str | None = None,
     heading_anchors: bool | None = None,
@@ -316,6 +327,11 @@ def _runtime_config(
         runtime.setdefault("_runtime", {})["extensions"] = [e if e.startswith(".") else f".{e}" for e in extensions]
     if overwrite:
         runtime["app"]["overwrite"] = True
+    if force_extract:
+        runtime.setdefault("_runtime", {})["force_extract"] = True
+        # Force Extract is its own transactional replacement mode. Do not delegate
+        # deletion to the legacy overwrite path.
+        runtime["app"]["overwrite"] = False
     cf = runtime.setdefault("confluence", {})
     if keep_hierarchy is not None:
         cf["keep_hierarchy"] = keep_hierarchy
@@ -727,10 +743,15 @@ def _cancelled(cfg: dict) -> None:
     console.print(f"[dim]{tr(cfg, 'interactive.cancelled')}[/dim]")
 
 
-def _interactive_extract(cfg: dict) -> None:
+def _interactive_extract(cfg: dict, *, force_extract: bool = False) -> None:
     source = Path(prompt_text(tr(cfg, "interactive.source"), str(cfg["app"]["source"])))
     dest = Path(prompt_text(tr(cfg, "interactive.destination"), str(cfg["app"]["destination"])))
-    outcomes = run_extract(cfg, source, dest)
+    runtime_cfg = deepcopy(cfg)
+    if force_extract:
+        runtime_cfg.setdefault("_runtime", {})["force_extract"] = True
+        runtime_cfg["app"]["overwrite"] = False
+        console.print(f"[yellow]{tr(cfg, 'extract.force_notice')}[/yellow]")
+    outcomes = run_extract(runtime_cfg, source, dest)
     for item in outcomes:
         if item.error:
             console.print(f"[red]{tr(cfg, 'state.error')}[/red] {item.source}: {item.error}")
@@ -1239,6 +1260,7 @@ def _extract_menu(cfg: dict) -> None:
             tr(cfg, "extract.title"),
             [
                 ("local", tr(cfg, "extract.local")),
+                ("force_local", tr(cfg, "extract.force_local")),
                 ("confluence", tr(cfg, "extract.confluence")),
                 ("jira", tr(cfg, "extract.jira")),
                 ("web", tr(cfg, "extract.web")),
@@ -1250,6 +1272,8 @@ def _extract_menu(cfg: dict) -> None:
         try:
             if choice == "local":
                 _interactive_extract(cfg)
+            elif choice == "force_local":
+                _interactive_extract(cfg, force_extract=True)
             elif choice == "confluence":
                 _interactive_extract_confluence(cfg)
             elif choice == "jira":
@@ -1324,56 +1348,61 @@ def _rag_menu(cfg: dict) -> None:
 def _help(cfg: dict) -> None:
     lang = config_language(cfg)
     text_by_lang = {
-        "fr": """[bold]DocSpecBridge permet de :[/bold]
-
-• Paramétrer la langue, les répertoires, les profils RAG/publication et plusieurs instances Confluence Cloud.
-• Extract : DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence et Jira vers des packages canoniques/Markdown autonomes.
-• Préserver autant que possible la taille d'affichage des images et diagnostiquer le vectoriel.
-• Import : publier un package vers Confluence Cloud ou Jira, avec images/pièces jointes et reprise sur état partiel.
-• Lister les espaces et pages racines Confluence et mémoriser un espace/page par défaut.
-• Utiliser aussi les commandes CLI : extract, publish, doc2wiki, doc2rag, rag-export, spaces, root-pages, config, doctor.
-• Doc2Wiki enchaîne extraction + publication ; Doc2RAG enchaîne extraction + export d'un corpus RAG portable.
-• Les sommaires/outline fiables sont convertis en niveaux de titres et en TOC Confluence native lorsque possible.
-
-Dans les listes : ↑/↓ pour naviguer, Entrée pour choisir, Esc pour revenir.""",
         "en": """[bold]DocSpecBridge can:[/bold]
 
-• Configure language, working directories, RAG/publication profiles and multiple Confluence Cloud instances.
-• Extract DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence and Jira into self-contained canonical/Markdown packages.
-• Preserve image display size when possible and diagnose vector graphics.
-• Import packages into Confluence Cloud or Jira, including images/attachments and resumable publication state.
-• List Confluence spaces/root pages and save defaults.
-• Use CLI commands: extract, publish, doc2wiki, doc2rag, rag-export, spaces, root-pages, config, doctor.
-• Doc2Wiki chains extraction + publishing; Doc2RAG chains extraction + portable RAG corpus export.
+• Extract DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence and Jira into portable canonical packages.
+• Import packages into Confluence or Jira with images, attachments and persistent publication state.
+• Browse Confluence by instance → space → page and Jira by instance → project → issue type → issue.
+• Force re-extract local packages while preserving Confluence/Jira publication identity.
+• Build human Markdown, HTML and portable RAG corpora from the same CanonicalDocument.
+• Automatically migrate older YAML configuration schemas after creating a backup.
+• Use CLI commands for extraction, publication, discovery, RAG, configuration and diagnostics.
 
-In lists: ↑/↓ navigate, Enter selects, Esc returns.""",
-        "de": """[bold]DocSpecBridge:[/bold]
+In lists: ↑/↓ navigate, Enter selects, Esc cancels the current action and returns.""",
+        "fr": """[bold]DocSpecBridge permet de :[/bold]
 
-• Sprache, Verzeichnisse, RAG-/Publikationsprofile und mehrere Confluence-Cloud-Instanzen konfigurieren.
-• DOCX, PDF und PPTX extrahieren.
-• Bildanzeigegrößen erhalten und Vektorgrafiken diagnostizieren.
-• Markdown mit Bildern nach Confluence Cloud veröffentlichen.
-• Bereiche und Stammseiten auflisten und Standards speichern.
+• Extraire DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence et Jira vers des packages canoniques portables.
+• Importer les packages vers Confluence ou Jira avec images, pièces jointes et état de publication persistant.
+• Parcourir Confluence par instance → espace → page et Jira par instance → projet → type de ticket → ticket.
+• Forcer la ré-extraction des packages locaux tout en préservant l'identité de publication Confluence/Jira.
+• Générer Markdown lisible, HTML et corpus RAG portable depuis le même CanonicalDocument.
+• Migrer automatiquement les anciens schémas YAML après création d'une sauvegarde.
+• Utiliser les commandes CLI pour l'extraction, la publication, la découverte, le RAG, la configuration et le diagnostic.
 
-Listen: ↑/↓ navigieren, Enter auswählen, Esc zurück.""",
+Dans les listes : ↑/↓ pour naviguer, Entrée pour choisir, Esc pour annuler l'action courante et revenir.""",
+        "de": """[bold]DocSpecBridge kann:[/bold]
+
+• DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence und Jira in portable kanonische Pakete extrahieren.
+• Pakete mit Bildern, Anhängen und dauerhaftem Veröffentlichungsstatus nach Confluence oder Jira importieren.
+• Confluence über Instanz → Bereich → Seite und Jira über Instanz → Projekt → Vorgangstyp → Vorgang durchsuchen.
+• Lokale Pakete zwangsweise neu extrahieren und dabei die Confluence-/Jira-Veröffentlichungsidentität beibehalten.
+• Lesbares Markdown, HTML und portable RAG-Korpora aus demselben CanonicalDocument erzeugen.
+• Ältere YAML-Konfigurationsschemata nach einer Sicherung automatisch migrieren.
+• CLI-Befehle für Extraktion, Veröffentlichung, Suche, RAG, Konfiguration und Diagnose verwenden.
+
+In Listen: ↑/↓ navigieren, Enter auswählen, Esc bricht die aktuelle Aktion ab und kehrt zurück.""",
         "es": """[bold]DocSpecBridge permite:[/bold]
 
-• Configurar idioma, directorios, perfiles RAG/publicación y varias instancias de Confluence Cloud.
-• Extraer DOCX, PDF y PPTX.
-• Conservar tamaños de visualización de imágenes y diagnosticar gráficos vectoriales.
-• Publicar Markdown en Confluence Cloud con imágenes.
-• Listar espacios y páginas raíz y guardar valores predeterminados.
+• Extraer DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence y Jira a paquetes canónicos portátiles.
+• Importar paquetes a Confluence o Jira con imágenes, adjuntos y estado de publicación persistente.
+• Explorar Confluence por instancia → espacio → página y Jira por instancia → proyecto → tipo de incidencia → incidencia.
+• Forzar la reextracción de paquetes locales conservando la identidad de publicación de Confluence/Jira.
+• Generar Markdown legible, HTML y corpus RAG portátiles desde el mismo CanonicalDocument.
+• Migrar automáticamente esquemas YAML antiguos después de crear una copia de seguridad.
+• Usar comandos CLI para extracción, publicación, exploración, RAG, configuración y diagnóstico.
 
-Listas: ↑/↓ navegar, Enter seleccionar, Esc volver.""",
-        "zh": """[bold]DocSpecBridge 功能：[/bold]
+En las listas: ↑/↓ navegan, Enter selecciona y Esc cancela la acción actual y vuelve.""",
+        "zh": """[bold]DocSpecBridge 可以：[/bold]
 
-• 配置语言、目录、RAG/发布配置以及多个 Confluence Cloud 实例。
-• 提取 DOCX、PDF、PPTX。
-• 尽可能保留图片显示尺寸并诊断矢量图形。
-• 将 Markdown 和内嵌图片发布到 Confluence Cloud。
-• 列出空间和根页面并保存默认值。
+• 将 DOCX、PDF、PPTX、XLSX、HTML、Markdown、Web、Confluence 和 Jira 提取为可移植的规范包。
+• 将包导入 Confluence 或 Jira，并保留图片、附件和持久发布状态。
+• 按 实例 → 空间 → 页面 浏览 Confluence，按 实例 → 项目 → 事项类型 → 事项 浏览 Jira。
+• 强制重新提取本地包，同时保留 Confluence/Jira 发布身份。
+• 从同一个 CanonicalDocument 生成可读 Markdown、HTML 和可移植 RAG 语料。
+• 在创建备份后自动迁移旧版 YAML 配置架构。
+• 使用 CLI 完成提取、发布、浏览、RAG、配置和诊断。
 
-列表中：↑/↓ 导航，Enter 选择，Esc 返回。""",
+列表中：↑/↓ 导航，Enter 选择，Esc 取消当前操作并返回。""",
     }
     console.print(text_by_lang.get(lang, text_by_lang["en"]))
 
@@ -1383,6 +1412,7 @@ def menu() -> None:
     if not config_path.exists():
         init_config(config_path)
     cfg = _apply_set_overrides(load_config(config_path))
+    _show_config_migration(cfg)
     ensure_workdirs(cfg)
 
     console.print(f"\n[bold cyan]DocSpecBridge {__version__}[/bold cyan]")

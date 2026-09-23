@@ -909,6 +909,10 @@ def config_menu(path: Path | None = None) -> Path:
     if not config_path.exists():
         init_config(config_path)
     cfg = load_config(config_path)
+    migration = ((cfg.get("_runtime") or {}).get("config_migration") or {})
+    if migration:
+        console.print(f"[yellow]{tr(cfg, 'config.migrated', old=migration.get('from_schema'), new=migration.get('to_schema'))}[/yellow]")
+        console.print(f"[dim]{tr(cfg, 'config.backup_created', path=migration.get('backup'))}[/dim]")
     original = deepcopy(cfg)
     dirty = False
     ensure_workdirs(cfg)
@@ -978,3 +982,38 @@ def config_menu(path: Path | None = None) -> Path:
         if changed:
             dirty = True
             console.print(f"[yellow]{tr(cfg, 'settings.pending')}[/yellow]")
+
+# Keep every settings field available in all five UI languages.
+_FIELD_TEXT["de"].update({
+    "keep_hierarchy": "Hierarchie im Batch-Modus beibehalten",
+    "overwrite_manual": "Manuelle Confluence-Änderungen überschreiben",
+    "page_id": "Confluence page_id im erzeugten Markdown speichern",
+    "heading_anchors": "Anker zu Überschriften hinzufügen",
+    "comments": "Behandlung von Inline-Kommentaren",
+    "alignment": "Globale Ausrichtung",
+    "image_max_width": "Maximale Bildbreite (px)",
+    "table_mode": "Tabellenanzeigemodus",
+    "table_width": "Maximale Tabellenbreite (px, - für keine)",
+})
+_FIELD_TEXT["es"].update({
+    "keep_hierarchy": "Conservar jerarquía en modo por lotes",
+    "overwrite_manual": "Sobrescribir cambios manuales de Confluence",
+    "page_id": "Guardar page_id de Confluence en el Markdown generado",
+    "heading_anchors": "Añadir anclas a los encabezados",
+    "comments": "Gestión de comentarios en línea",
+    "alignment": "Alineación global",
+    "image_max_width": "Ancho máximo de imagen (px)",
+    "table_mode": "Modo de visualización de tablas",
+    "table_width": "Ancho máximo de tabla (px, - para ninguno)",
+})
+_FIELD_TEXT["zh"].update({
+    "keep_hierarchy": "批量模式下保留层级结构",
+    "overwrite_manual": "覆盖 Confluence 中的手工修改",
+    "page_id": "在生成的 Markdown 中保存 Confluence page_id",
+    "heading_anchors": "为标题添加锚点",
+    "comments": "行内评论处理",
+    "alignment": "全局对齐方式",
+    "image_max_width": "图片最大宽度（px）",
+    "table_mode": "表格显示模式",
+    "table_width": "表格最大宽度（px，- 表示不限制）",
+})

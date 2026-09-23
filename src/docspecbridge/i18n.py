@@ -998,3 +998,167 @@ _TRANSLATIONS["zh"].update({
     "jira.discovery.manual_prompt": "Jira 工单键",
     "jira.discovery.more_available": "还有更多工单；可在交互菜单中继续浏览下一页。",
 })
+
+# 0.5.2 configuration migration, transactional re-extraction and strict publication-state safety.
+_TRANSLATIONS["en"].update({
+    "cli.opt.force_extract": "Re-extract existing packages transactionally while preserving publication state",
+    "extract.force_local": "Force re-extract local documents (preserve publication state)",
+    "extract.force_notice": "Force Extract preserves publication state, rebuilds each package, and restores the previous package if extraction fails.",
+    "extract.force_preserved": "Force Extract: publication state preserved and migrated.",
+    "extract.force_rollback": "Force Extract failed: the previous package was restored unchanged.",
+    "extract.force_state_error": "Force Extract could not migrate {file}: {error}",
+    "config.migrated": "Configuration schema migrated automatically from {old} to {new}.",
+    "config.backup_created": "Configuration backup: {path}",
+    "config.schema_too_new": "This configuration was created with a newer schema ({current}). This DocSpecBridge version supports up to schema {supported}. Upgrade DocSpecBridge before modifying this configuration.",
+    "config.invalid_yaml": "Invalid YAML configuration: {path}",
+    "publication.state_missing_page_id": "Publication state exists for package '{source}' but contains no Confluence page ID. Publication was stopped to prevent an accidental duplicate.",
+    "publication.state_page_missing": "The publication state targets Confluence page ID {page_id}, but that page no longer exists or is not accessible. Publication was stopped; no new page was created.",
+    "publication.state_location_mismatch": "Confluence page ID {page_id} exists but is not under the expected destination (space {space}, parent {parent}). Publication was stopped; no new page was created.",
+    "publication.title_conflict": "Another Confluence page already uses the requested title '{title}' (ID {page_id}, parent {parent}). Publication was stopped.",
+})
+_TRANSLATIONS["fr"].update({
+    "cli.opt.force_extract": "Réextraire transactionnellement les packages existants en préservant l'état de publication",
+    "extract.force_local": "Forcer la ré-extraction des documents locaux (préserver l'état de publication)",
+    "extract.force_notice": "Force Extract préserve l'état de publication, reconstruit chaque package et restaure l'ancien package si l'extraction échoue.",
+    "extract.force_preserved": "Force Extract : état de publication préservé et migré.",
+    "extract.force_rollback": "Échec de Force Extract : l'ancien package a été restauré sans modification.",
+    "extract.force_state_error": "Force Extract n'a pas pu migrer {file} : {error}",
+    "config.migrated": "Le schéma de configuration a été migré automatiquement de {old} vers {new}.",
+    "config.backup_created": "Sauvegarde de la configuration : {path}",
+    "config.schema_too_new": "Cette configuration utilise un schéma plus récent ({current}). Cette version de DocSpecBridge prend en charge au maximum le schéma {supported}. Mettez DocSpecBridge à niveau avant de modifier cette configuration.",
+    "config.invalid_yaml": "Configuration YAML invalide : {path}",
+    "publication.state_missing_page_id": "Un état de publication existe pour le package '{source}' mais ne contient aucun ID de page Confluence. Publication arrêtée pour éviter un doublon accidentel.",
+    "publication.state_page_missing": "L'état de publication cible la page Confluence ID {page_id}, mais cette page n'existe plus ou n'est pas accessible. Publication arrêtée ; aucune nouvelle page n'a été créée.",
+    "publication.state_location_mismatch": "La page Confluence ID {page_id} existe mais n'est pas dans la destination attendue (espace {space}, parent {parent}). Publication arrêtée ; aucune nouvelle page n'a été créée.",
+    "publication.title_conflict": "Une autre page Confluence utilise déjà le titre demandé '{title}' (ID {page_id}, parent {parent}). Publication arrêtée.",
+})
+_TRANSLATIONS["de"].update({
+    "cli.opt.force_extract": "Vorhandene Pakete transaktional neu extrahieren und Veröffentlichungsstatus beibehalten",
+    "extract.force_local": "Lokale Dokumente zwangsweise neu extrahieren (Veröffentlichungsstatus beibehalten)",
+    "extract.force_notice": "Force Extract behält den Veröffentlichungsstatus bei, erstellt jedes Paket neu und stellt bei einem Fehler das vorherige Paket wieder her.",
+    "extract.force_preserved": "Force Extract: Veröffentlichungsstatus beibehalten und migriert.",
+    "extract.force_rollback": "Force Extract fehlgeschlagen: Das vorherige Paket wurde unverändert wiederhergestellt.",
+    "extract.force_state_error": "Force Extract konnte {file} nicht migrieren: {error}",
+    "config.migrated": "Das Konfigurationsschema wurde automatisch von {old} auf {new} migriert.",
+    "config.backup_created": "Konfigurationssicherung: {path}",
+    "config.schema_too_new": "Diese Konfiguration wurde mit einem neueren Schema ({current}) erstellt. Diese DocSpecBridge-Version unterstützt höchstens Schema {supported}. Aktualisieren Sie DocSpecBridge, bevor Sie diese Konfiguration ändern.",
+    "config.invalid_yaml": "Ungültige YAML-Konfiguration: {path}",
+    "publication.state_missing_page_id": "Für Paket '{source}' existiert ein Veröffentlichungsstatus, aber keine Confluence-Seiten-ID. Die Veröffentlichung wurde beendet, um ein versehentliches Duplikat zu verhindern.",
+    "publication.state_page_missing": "Der Veröffentlichungsstatus verweist auf Confluence-Seite {page_id}, aber die Seite existiert nicht mehr oder ist nicht zugänglich. Es wurde keine neue Seite erstellt.",
+    "publication.state_location_mismatch": "Confluence-Seite {page_id} befindet sich nicht am erwarteten Ziel (Bereich {space}, übergeordnete Seite {parent}). Es wurde keine neue Seite erstellt.",
+    "publication.title_conflict": "Eine andere Confluence-Seite verwendet bereits den Titel '{title}' (ID {page_id}, übergeordnet {parent}). Veröffentlichung beendet.",
+})
+_TRANSLATIONS["es"].update({
+    "cli.opt.force_extract": "Reextraer transaccionalmente los paquetes existentes conservando el estado de publicación",
+    "extract.force_local": "Forzar reextracción de documentos locales (conservar estado de publicación)",
+    "extract.force_notice": "Force Extract conserva el estado de publicación, reconstruye cada paquete y restaura el paquete anterior si falla la extracción.",
+    "extract.force_preserved": "Force Extract: estado de publicación conservado y migrado.",
+    "extract.force_rollback": "Force Extract falló: se restauró el paquete anterior sin cambios.",
+    "extract.force_state_error": "Force Extract no pudo migrar {file}: {error}",
+    "config.migrated": "El esquema de configuración se migró automáticamente de {old} a {new}.",
+    "config.backup_created": "Copia de seguridad de configuración: {path}",
+    "config.schema_too_new": "Esta configuración fue creada con un esquema más reciente ({current}). Esta versión de DocSpecBridge admite hasta el esquema {supported}. Actualice DocSpecBridge antes de modificar esta configuración.",
+    "config.invalid_yaml": "Configuración YAML no válida: {path}",
+    "publication.state_missing_page_id": "Existe un estado de publicación para el paquete '{source}', pero no contiene un ID de página de Confluence. La publicación se detuvo para evitar un duplicado accidental.",
+    "publication.state_page_missing": "El estado de publicación apunta a la página de Confluence {page_id}, pero ya no existe o no es accesible. La publicación se detuvo y no se creó ninguna página nueva.",
+    "publication.state_location_mismatch": "La página de Confluence {page_id} no está en el destino esperado (espacio {space}, padre {parent}). La publicación se detuvo y no se creó ninguna página nueva.",
+    "publication.title_conflict": "Otra página de Confluence ya utiliza el título solicitado '{title}' (ID {page_id}, padre {parent}). Publicación detenida.",
+})
+_TRANSLATIONS["zh"].update({
+    "cli.opt.force_extract": "以事务方式重新提取现有包并保留发布状态",
+    "extract.force_local": "强制重新提取本地文档（保留发布状态）",
+    "extract.force_notice": "Force Extract 会保留发布状态、重新构建每个包；如果提取失败，则恢复原包。",
+    "extract.force_preserved": "Force Extract：发布状态已保留并迁移。",
+    "extract.force_rollback": "Force Extract 失败：已原样恢复之前的包。",
+    "extract.force_state_error": "Force Extract 无法迁移 {file}：{error}",
+    "config.migrated": "配置架构已自动从 {old} 迁移到 {new}。",
+    "config.backup_created": "配置备份：{path}",
+    "config.schema_too_new": "此配置使用了更新的架构版本 ({current})。当前 DocSpecBridge 最多支持架构 {supported}。请先升级 DocSpecBridge 再修改此配置。",
+    "config.invalid_yaml": "YAML 配置无效：{path}",
+    "publication.state_missing_page_id": "包“{source}”存在发布状态，但没有 Confluence 页面 ID。为避免意外重复，发布已停止。",
+    "publication.state_page_missing": "发布状态指向 Confluence 页面 ID {page_id}，但该页面已不存在或不可访问。发布已停止，未创建新页面。",
+    "publication.state_location_mismatch": "Confluence 页面 ID {page_id} 不在预期目标位置（空间 {space}，父页面 {parent}）。发布已停止，未创建新页面。",
+    "publication.title_conflict": "另一个 Confluence 页面已使用请求的标题“{title}”（ID {page_id}，父页面 {parent}）。发布已停止。",
+})
+
+_TRANSLATIONS["en"].update({
+    "cli.opt.version": "Show the DocSpecBridge version and exit",
+    "cli.opt.set": "Override any YAML setting: --set dotted.path=value (repeatable; highest precedence)",
+})
+_TRANSLATIONS["fr"].update({
+    "cli.opt.version": "Afficher la version de DocSpecBridge et quitter",
+    "cli.opt.set": "Surcharger un paramètre YAML : --set chemin.pointé=valeur (répétable ; priorité maximale)",
+})
+_TRANSLATIONS["de"].update({
+    "cli.opt.version": "DocSpecBridge-Version anzeigen und beenden",
+    "cli.opt.set": "YAML-Einstellung überschreiben: --set punkt.pfad=wert (wiederholbar; höchste Priorität)",
+})
+_TRANSLATIONS["es"].update({
+    "cli.opt.version": "Mostrar la versión de DocSpecBridge y salir",
+    "cli.opt.set": "Sobrescribir una opción YAML: --set ruta.punteada=valor (repetible; máxima prioridad)",
+})
+_TRANSLATIONS["zh"].update({
+    "cli.opt.version": "显示 DocSpecBridge 版本并退出",
+    "cli.opt.set": "覆盖 YAML 设置：--set dotted.path=value（可重复；最高优先级）",
+})
+
+_TRANSLATIONS["en"].update({"extract.force_missing_nested_package": "Force Extract cannot map a previously published nested package at '{path}' to the regenerated corpus. The operation was cancelled to preserve publication identity."})
+_TRANSLATIONS["fr"].update({"extract.force_missing_nested_package": "Force Extract ne peut pas associer l'ancien sous-package publié '{path}' au corpus régénéré. L'opération a été annulée afin de préserver l'identité de publication."})
+_TRANSLATIONS["de"].update({"extract.force_missing_nested_package": "Force Extract kann das zuvor veröffentlichte Unterpaket '{path}' keinem neu erzeugten Paket zuordnen. Der Vorgang wurde abgebrochen, um die Veröffentlichungsidentität zu bewahren."})
+_TRANSLATIONS["es"].update({"extract.force_missing_nested_package": "Force Extract no puede asociar el subpaquete publicado anteriormente '{path}' con el corpus regenerado. La operación se canceló para conservar la identidad de publicación."})
+_TRANSLATIONS["zh"].update({"extract.force_missing_nested_package": "Force Extract 无法将之前已发布的子包“{path}”映射到重新生成的语料。为保留发布身份，操作已取消。"})
+
+_TRANSLATIONS["en"].update({
+    "config.invalid_schema": "Invalid configuration schema version: {value}",
+    "config.migration_missing": "No configuration migration is available for schema {schema}.",
+})
+_TRANSLATIONS["fr"].update({
+    "config.invalid_schema": "Version de schéma de configuration invalide : {value}",
+    "config.migration_missing": "Aucune migration de configuration n'est disponible pour le schéma {schema}.",
+})
+_TRANSLATIONS["de"].update({
+    "config.invalid_schema": "Ungültige Konfigurationsschema-Version: {value}",
+    "config.migration_missing": "Für Konfigurationsschema {schema} ist keine Migration verfügbar.",
+})
+_TRANSLATIONS["es"].update({
+    "config.invalid_schema": "Versión de esquema de configuración no válida: {value}",
+    "config.migration_missing": "No hay ninguna migración de configuración disponible para el esquema {schema}.",
+})
+_TRANSLATIONS["zh"].update({
+    "config.invalid_schema": "配置架构版本无效：{value}",
+    "config.migration_missing": "没有适用于配置架构 {schema} 的迁移。",
+})
+
+
+# 0.5.3 XLSX workbook navigation text. Generated workbook landing pages follow the
+# selected application language just like prompts, help and diagnostics.
+_TRANSLATIONS["en"].update({
+    "xlsx.workbook_summary": "Excel workbook — {count} worksheets",
+    "xlsx.contents": "Worksheets",
+    "xlsx.empty_worksheet": "(empty worksheet)",
+    "xlsx.cached_unavailable": "{formula} [cached result unavailable]",
+})
+_TRANSLATIONS["fr"].update({
+    "xlsx.workbook_summary": "Classeur Excel — {count} feuilles",
+    "xlsx.contents": "Feuilles",
+    "xlsx.empty_worksheet": "(feuille vide)",
+    "xlsx.cached_unavailable": "{formula} [résultat mis en cache indisponible]",
+})
+_TRANSLATIONS["de"].update({
+    "xlsx.workbook_summary": "Excel-Arbeitsmappe — {count} Arbeitsblätter",
+    "xlsx.contents": "Arbeitsblätter",
+    "xlsx.empty_worksheet": "(leeres Arbeitsblatt)",
+    "xlsx.cached_unavailable": "{formula} [zwischengespeichertes Ergebnis nicht verfügbar]",
+})
+_TRANSLATIONS["es"].update({
+    "xlsx.workbook_summary": "Libro de Excel — {count} hojas",
+    "xlsx.contents": "Hojas",
+    "xlsx.empty_worksheet": "(hoja vacía)",
+    "xlsx.cached_unavailable": "{formula} [resultado en caché no disponible]",
+})
+_TRANSLATIONS["zh"].update({
+    "xlsx.workbook_summary": "Excel 工作簿 — {count} 个工作表",
+    "xlsx.contents": "工作表",
+    "xlsx.empty_worksheet": "（空工作表）",
+    "xlsx.cached_unavailable": "{formula} [缓存结果不可用]",
+})

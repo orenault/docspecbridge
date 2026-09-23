@@ -1,15 +1,12 @@
-# DocSpecBridge 0.5.1
+# DocSpecBridge
 
-DocSpecBridge is a canonical specification bridge for **DOCX / PDF / PPTX / XLSX / HTML / Markdown / Web / Confluence Cloud / Jira Cloud**.
+DocSpecBridge is a canonical specification bridge for **DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence Cloud and Jira Cloud**.
 
-Version 0.5.1 keeps the CanonicalDocument architecture introduced in 0.4 and reorganizes the product around two explicit directions:
-
-- **Extract**: a source becomes a portable canonical/Markdown package;
-- **Import**: a package is published to a target such as Confluence or Jira.
+It separates source extraction from target publication:
 
 ```mermaid
 flowchart LR
-    subgraph SRC[Extract - sources]
+    subgraph Sources
       DOCX[DOCX]
       PDF[PDF]
       PPTX[PPTX]
@@ -19,37 +16,135 @@ flowchart LR
       JIRA[Jira]
     end
 
-    SRC --> CAN[CanonicalDocument]
+    Sources --> CAN[CanonicalDocument]
     CAN --> PKG[Portable package]
     PKG --> MD[Human Markdown]
     PKG --> RAG[RAG Markdown + chunks]
-    PKG --> H[HTML]
-    PKG --> CFM[Confluence renderer]
-
-    PKG --> CFT[Import Confluence]
-    PKG --> JRT[Import Jira]
+    PKG --> WEB[Portable HTML]
+    PKG --> CFT[Confluence]
+    PKG --> JRT[Jira]
 ```
 
-## What changes in 0.5.x
+The canonical JSON is the structural source of truth. Markdown is a readable view, not the lossless pivot. This makes it possible to preserve information such as merged cells, image geometry, source metadata and target-specific rendering hints without polluting the RAG view.
 
-### 1. Extract / Import menus
+For version-by-version changes, see [CHANGELOG.md](CHANGELOG.md).
 
-The interactive main menu is now deliberately small:
+## Installation
+
+DocSpecBridge requires Python 3.10 or newer. The repository suggests Python 3.14 through `.python-version`.
+
+With `uv`:
+
+```powershell
+uv sync
+uv run docspecbridge doctor
+```
+
+For an installed package:
+
+```powershell
+uv pip install -U docspecbridge
+```
+
+or, when installed as an uv tool:
+
+```powershell
+uv tool upgrade docspecbridge
+```
+
+## Interactive application
+
+Run:
+
+```powershell
+docspecbridge
+```
+
+The main menu is intentionally organized by direction:
 
 ```text
-Paramétrage
-Extract — depuis les sources
-Import — vers Confluence / Jira
+Settings
+Extract
+Import
 RAG
-Aide
-Quitter
+Help
+Quit
 ```
 
-**Extract** contains local documents, Confluence, Jira and Web. **Import** contains Confluence and Jira. Legacy CLI commands remain available for automation and 0.4.x compatibility.
+The displayed language is controlled by `app.language` and supports:
 
-### 2. Source-specific output names
+- English (`en`)
+- French (`fr`)
+- German (`de`)
+- Spanish (`es`)
+- Chinese (`zh`)
 
-A source named `specification.docx` now produces human-facing files named after the source instead of generic `document.*` names:
+Menus, prompts, help text, status messages, warnings and application-level errors use the selected language. English is the fallback language if a translation key is unavailable.
+
+In interactive selectors, use arrow keys to navigate, **Enter** to confirm and **Esc** to cancel the current action and return to the previous menu.
+
+## Configuration
+
+DocSpecBridge looks for `docspecbridge.yaml`, `docspecbridge.yml`, `config.yaml` or `config.yml` in the current directory.
+
+Configuration files carry explicit schema metadata:
+
+```yaml
+docspecbridge:
+  config_schema_version: 2
+  last_updated_by: "0.5.4"
+```
+
+`config_schema_version` controls structural migrations. `last_updated_by` records the DocSpecBridge version that last wrote or migrated the file.
+
+When an older configuration schema is opened, DocSpecBridge:
+
+1. creates a backup next to the YAML file;
+2. applies each required schema migration in sequence;
+3. writes the current configuration structure;
+4. records the current schema and DocSpecBridge version.
+
+A backup is named similarly to:
+
+```text
+docspecbridge.yaml.pre-0.5.4.bak
+```
+
+If a configuration uses a schema newer than the running application supports, DocSpecBridge refuses to modify it and asks the user to upgrade the application.
+
+Source file extensions are application capabilities and are **not** stored in YAML. Supported local source types are detected by the application itself. `--extension/-e` remains available as a temporary command-line filter and is never persisted.
+
+A complete example is available in [`config.example.yaml`](config.example.yaml).
+
+### Generic CLI overrides
+
+Any configuration key can be overridden for one invocation:
+
+```powershell
+docspecbridge --set profiles.rag.chunking.max_characters=2200 doc2rag
+docspecbridge --set confluence.converter.render_mermaid=true publish --source .\output\specification__docx
+```
+
+Precedence is:
+
+```text
+defaults < YAML < explicit command options < --set
+```
+
+Use `docspecbridge config-keys` to inspect the effective configuration tree.
+
+## Extract local documents
+
+Default folders are `./input` and `./output`.
+
+```powershell
+docspecbridge extract
+docspecbridge extract --source .\input --dest .\output
+```
+
+Supported local sources include DOCX, PDF, PPTX, XLSX, HTML/HTM and Markdown.
+
+A source such as `specification.docx` produces a self-contained package:
 
 ```text
 output/
@@ -69,110 +164,61 @@ output/
     └── publication_images/
 ```
 
-`manifest.json`, `chunks.jsonl`, `rag.json` and state files intentionally keep stable generic names. Readers use `manifest.json` first and fall back to the 0.4.x names (`document.json`, `document.md`, `render_document.md`, …), so existing packages remain readable.
+Readers resolve files through `manifest.json` first and retain compatibility fallbacks for older package names.
 
-## Canonical model
+### Force Extract
 
-Markdown is not the lossless pivot. Structural information such as merged cells, image dimensions and source metadata lives in CanonicalDocument JSON and each target is rendered independently from it.
+Use **Force Extract** when a package must be regenerated while preserving its publication identity, for example after upgrading DocSpecBridge and rebuilding an already-published corpus.
+
+CLI:
+
+```powershell
+docspecbridge extract --force-extract
+```
+
+The interactive Extract menu provides the same mode.
+
+Force Extract is transactional:
 
 ```mermaid
 flowchart TD
-    SOURCE[Source adapter] --> CAN[CanonicalDocument JSON]
-    CAN --> HUMAN[Readable Markdown]
-    CAN --> RAG[RAG-safe Markdown]
-    CAN --> HTML[Portable HTML]
-    CAN --> CONFLUENCE[Confluence XHTML/Markdown]
-    CAN --> ADF[Jira ADF]
+    A[Existing package] --> B[Rename to temporary backup]
+    B --> C[Extract a new package]
+    C --> D{Extraction successful?}
+    D -- No --> E[Delete partial package]
+    E --> F[Restore previous package unchanged]
+    D -- Yes --> G[Migrate publication states]
+    G --> H[Replace previous package]
 ```
 
-For example, a merged table cell exists once in CanonicalDocument with its `rowspan`/`colspan`; Markdown leaves covered cells blank instead of duplicating their contents while Confluence can restore the merge.
+It preserves and migrates:
 
-## XLSX support
+- `publication_state.json` for Confluence page identity;
+- `jira_publication_state.json` for Jira publication resume state.
 
-XLSX has a native adapter in 0.5.0 rather than going through Xberg.
+For Confluence, the preserved `page_id` remains the strong identity even if the page title was manually changed after the original publication. For Jira, the package fingerprint stored in the state is updated to the newly generated manifest so a resumed import continues to target the existing issue.
 
-A workbook creates a root package plus one child package per worksheet:
+`--overwrite` remains available as a destructive package replacement option. It does **not** provide publication-state preservation. Use `--force-extract` for migration/rebuild scenarios.
 
-```text
-budget__xlsx/
-├── budget.xlsx
-├── budget.json
-├── budget.md
-├── budget.rag.md
-├── budget.html
-├── budget.confluence.md
-├── budget.workbook.json
-├── manifest.json
-└── sheets/
-    ├── 01-Budget/
-    │   ├── Budget.json
-    │   ├── Budget.md
-    │   ├── Budget.rag.md
-    │   ├── Budget.html
-    │   ├── Budget.confluence.md
-    │   └── images/chart_001.svg
-    └── 02-Notes/
-        └── ...
-```
+## XLSX
 
-The workbook metadata records formulas and cached formula results separately. When Excel has not stored a cached result, the extraction records `cached_value_missing: true` rather than inventing a result. Common bar, line/scatter-like and pie charts receive a lightweight SVG preview; the original XLSX remains the authoritative source.
+XLSX uses a native adapter so workbook and worksheet structure, formulas and charts can be represented explicitly. Formula expressions and cached values are recorded separately. When Excel has not stored a cached result, DocSpecBridge records that fact rather than inventing one. Common chart types receive portable SVG previews while the original workbook remains authoritative.
 
-When such a package is imported into Confluence, DocSpecBridge publishes the workbook page first and then worksheet pages underneath it.
+A workbook with a single worksheet is represented directly by the root package: there is no artificial landing page.
 
-## Main commands
+A workbook with multiple worksheets produces a workbook landing page plus one child package per worksheet. The landing page is a real navigation page:
 
-```powershell
-# Interactive UI
-docspecbridge
+- human Markdown links to the generated worksheet Markdown files;
+- local HTML links to the generated worksheet HTML files;
+- Confluence uses a dynamic child-page listing, while each worksheet is published as a child page below the workbook page.
 
-# Extract local documents
-docspecbridge extract --source .\input --dest .\output
-
-# Confluence/Jira/Web used as sources
-docspecbridge conf2md --page-id 123456789
-docspecbridge jira2md --issue ABC-123
-docspecbridge web2md --url https://example.org/page
-
-# Import targets
-docspecbridge publish --source .\output\specification__docx
-docspecbridge md2jira --source .\output\specification__docx --project ABC --issue-type Story
-
-# Jira discovery
-docspecbridge jira-projects --query ABC
-docspecbridge jira-issue-types --project ABC
-
-# RAG
-docspecbridge doc2rag
-docspecbridge rag-export
-
-# Configuration / diagnostics
-docspecbridge config
-docspecbridge config-keys
-docspecbridge doctor
-```
-
-### Override any YAML setting from the CLI
-
-Every configuration key can be overridden with a repeatable global `--set dotted.path=value`. Its precedence is intentionally highest:
-
-```text
-defaults < YAML < explicit command options < --set
-```
-
-Examples:
-
-```powershell
-docspecbridge --set app.overwrite=true extract --source .\specs
-docspecbridge --set profiles.rag.chunking.max_characters=2200 doc2rag
-docspecbridge --set confluence.converter.render_mermaid=true publish --source .\output\spec__docx
-docspecbridge config-keys
-```
-
-`config-keys` lists the effective configuration tree and therefore all dotted keys accepted by `--set`.
+This keeps local packages navigable and lets Confluence reflect the actual child-page hierarchy after publication.
 
 ## Confluence Cloud
 
-Multiple instances are supported. Secrets remain in environment variables.
+Multiple Confluence Cloud instances are supported. Secrets are referenced through environment variables rather than stored in YAML.
+
+Example:
 
 ```yaml
 confluence:
@@ -187,21 +233,38 @@ confluence:
       root_page: ""
 ```
 
-### Confluence as an Extract source
+### Confluence as a source
 
-`conf2md` preserves the raw page JSON and Storage Format, then creates the canonical package. Attachment extraction is selectable:
+Interactive discovery follows:
+
+```text
+Instance
+  → Space
+    → Page
+      → attachment options
+```
+
+Configured defaults preselect the corresponding choice but never bypass discovery or hide the selected destination.
+
+CLI example:
 
 ```powershell
 docspecbridge conf2md --page-id 123456789 --attachments all
-docspecbridge conf2md --page-id 123456789 --attachments images
-docspecbridge conf2md --page-id 123456789 --attachments none --zip-package
 ```
 
-The interactive Extract flow exposes the same choices. Downloaded attached images are rewritten to local package paths when they are referenced by page content.
+The raw Confluence page JSON and Storage Format are preserved in the package. Attachments can be downloaded as `none`, `images` or `all`.
 
-### Confluence Import
+### Import to Confluence
 
-`replace` synchronizes the page identified for the selected instance/space/parent. `add` creates a new copy and chooses a unique title if necessary. Destination identity stays in `publication_state.json`; generated publication Markdown remains target-independent.
+`replace` synchronizes an intended page. `add` creates a new copy with a unique title when necessary.
+
+Publication identity is kept in `publication_state.json`, not injected permanently into generated Markdown.
+
+When a `replace` state contains a Confluence `page_id`, DocSpecBridge treats that ID as authoritative. It verifies that the page still exists and belongs to the expected space and parent. If the page is missing, inaccessible or moved to a different destination, publication stops instead of silently creating a duplicate page.
+
+If no publication state exists, `replace` can still resolve an existing page by title under the selected parent and otherwise create a new page.
+
+Example publication settings:
 
 ```yaml
 confluence:
@@ -210,135 +273,121 @@ confluence:
     page_title_source: document_title
     add_title_suffix: " ({n})"
     verify_after_publish: true
-    attachments: none       # none | source | rendered | all
-    attachment_zip: false   # also attach a ZIP of the complete package
+    attachments: none
+    attachment_zip: false
 ```
-
-When auxiliary attachments are enabled, DocSpecBridge skips a same-name/same-size file already attached to the page. Images referenced inline by the rendered page continue to be handled by the Confluence publication layer.
-
-The Confluence width, hierarchy, comment and converter settings from 0.4 remain supported. `--render-mermaid` now correctly overrides `confluence.converter.render_mermaid`.
 
 ## Jira Cloud
 
-Jira support is substantially expanded in 0.5.0.
+Jira can be used both as an extraction source and an import target.
 
-### Jira as an Extract source
+### Jira as a source
 
-`jira2md` stores the raw issue JSON, converts the description from ADF, and can also retrieve:
+Interactive extraction offers two paths:
 
-- paginated comments (enabled by default);
-- issue attachments, including images;
-- custom/standard fields with their Jira field names;
-- optional paginated changelog/history.
-
-```yaml
-jira:
-  export:
-    include_comments: true
-    include_attachments: true
-    include_changelog: false
+```text
+Enter an issue key directly
+or
+Browse
+  → Project
+    → Issue type
+      → paginated issue list
 ```
 
-Attachments are stored under `attachments/`. Downloads use Jira's authenticated attachment-content endpoint. Media references are matched by Jira media metadata, URL and filename/alt text; downloaded attachments are also exposed in an explicit **Attachments / Pièces jointes** section so non-inline files stay visible in Markdown/HTML packages. Comments are rendered in a dedicated localized section after the issue description.
+Selecting the issue type before issue retrieval narrows the JQL query and avoids loading hundreds or thousands of issues unnecessarily. The browser loads one page at a time; the default page size is 50 and can be configured up to 100.
 
-Interactive Jira extraction first offers two explicit modes: **enter an issue key directly**, or **browse Jira**. Browse mode follows **instance → project → issue type → paginated issue list**. The issue type is applied to the JQL query before issues are fetched, so large projects are narrowed before display. The list contains at most 50 recently updated issues by default, with search/filter and next-page navigation. `Esc` remains available at each step. The page size is configurable with `jira.discovery.page_size` (1..100).
+Jira extraction can include:
 
-### Jira Import
+- issue description and fields;
+- paginated comments;
+- attachments and inline images;
+- optional changelog/history;
+- Jira Service Management comment fallback when applicable.
 
-The interactive flow is:
+A `<ISSUE>.comments.json` diagnostic file is written when comment extraction is requested, including when no accessible comments are returned.
 
-```mermaid
-flowchart LR
-    I[Choose Jira instance]
-    I --> P[Search/list projects]
-    P --> T[List issue types for selected project]
-    T --> S[Package title -> Summary]
-    S --> D[Canonical content -> ADF Description]
-    D --> C[Create/reuse issue]
-    C --> A[Upload images and attachments]
-    A --> U[Update ADF with media at original positions]
-```
+### Import to Jira
 
-The title becomes `summary`; canonical content becomes the ADF `description`. Local images and package attachments are uploaded after issue creation, then the description is updated so image blocks stay at their original canonical positions.
+The interactive path discovers the Jira instance, project and issue type before publication. The package title becomes the default Summary, CanonicalDocument content is converted to ADF, and local images/attachments are uploaded and inserted back into the issue description where possible.
 
-A `jira_publication_state.json` file is written after every phase. If a publication fails after the issue has been created or after only some attachments were uploaded, rerunning the same package/project/type resumes from that state instead of creating a second issue. Existing same-name issue attachments are reused.
+`jira_publication_state.json` records partial progress. A retry can reuse the issue that was already created and skip attachments already uploaded.
 
-Useful discovery commands:
+## Web, HTML and Markdown
+
+Local `.html` / `.htm` files placed directly in `input/` are processed through the same CanonicalDocument pipeline as other local sources. Markdown files are handled the same way. Remote web pages can be fetched with `web2md`; the server-returned HTML is preserved and referenced images can be downloaded into the package.
+
+Fenced Mermaid blocks in Markdown are recognized as semantic diagram blocks rather than generic source code. Human Markdown and RAG Markdown preserve the original `mermaid` fence, local HTML marks the diagram with a `mermaid` class for downstream/browser rendering, and Confluence publication passes a real Mermaid block to `markdown-to-confluence`. Confluence rendering behavior is controlled by `confluence.converter.render_mermaid`: pre-rendering requires Mermaid CLI (`mmdc`), while non-rendered Mermaid requires a compatible Confluence Marketplace integration.
+
+HTML extraction is currently semantic rather than a browser snapshot. Headings, paragraphs, lists, tables, links and images are normalized into the canonical model, while scripts and styles are deliberately not executed. As a result, JavaScript-heavy pages, iframe-driven content and layouts that depend strongly on CSS may lose runtime content or visual presentation. A future browser-rendered extraction mode can address those cases without changing the canonical publication pipeline.
 
 ```powershell
-docspecbridge jira-projects --query TEST
-docspecbridge jira-issues --project TEST --type Story --limit 50
-docspecbridge jira-issues --project TEST --type Story --query authentication
-docspecbridge jira-issue-types --project TEST
+docspecbridge web2md --url https://example.org/page
+docspecbridge html2md --source .\page.html
+docspecbridge md2html --source .\page.md
 ```
-
-If `jira.instances` is empty, Jira can reuse the Confluence Atlassian Cloud credentials.
-
-## HTML / Web
-
-HTML remains both a source and a rendered destination. Local HTML/HTM can be processed by `extract`/`html2md`; `web2md` downloads a remote HTML page, preserves the returned source, selects `<main>`/`<article>` when available and copies/downloads referenced images when configured.
-
-Generated HTML uses the same canonical image paths as the package, so local images remain resolvable beside the HTML output.
-
-## DOCX / PDF / PPTX
-
-The 0.4 adapters remain in place. DOCX combines Mammoth and OOXML inspection for structure and formatting while Xberg remains the broader extraction engine. Existing handling of merged cells, lists, source TOCs, image geometry, PDF repeated images and OOXML media recovery is retained.
 
 ## RAG
 
-`*.rag.md` is rendered directly from CanonicalDocument. `chunks.jsonl` is then generated from that view; navigation-only TOCs and decorative/header/footer images are excluded according to the RAG profile.
+`document.rag.md`/`<source>.rag.md` is generated independently from the human Markdown. Navigation-only TOC content and decorative/header/footer imagery can be omitted without changing the publication representation.
 
-```yaml
-profiles:
-  rag:
-    enabled: true
-    keep_image_references: true
-    include_header_images: false
-    include_footer_images: false
-    chunking:
-      enabled: true
-      max_characters: 1600
-      overlap: 150
-      prepend_heading_context: true
-```
-
-## Configuration compatibility
-
-0.5.1 continues to migrate older YAML keys, including the legacy top-level `rag` profile and the old single-instance Confluence structure. Existing 0.4.x package readers are supported through manifest-first resolution plus legacy filename fallbacks.
-
-## Installation / development
+Chunked output is written to `chunks.jsonl` and can be aggregated into a portable corpus:
 
 ```powershell
-uv venv --python 3.14.7
-.\.venv\Scripts\Activate.ps1
-uv sync
-pytest -q
+docspecbridge doc2rag
+docspecbridge rag-export
+```
+
+## Main CLI commands
+
+```powershell
+docspecbridge                       # interactive application
+docspecbridge --version
+docspecbridge doctor
+
+docspecbridge extract
+docspecbridge extract --force-extract
+
+docspecbridge conf2md --page-id 123456789
+docspecbridge jira2md --issue ABC-123
+docspecbridge web2md --url https://example.org/page
+
+docspecbridge publish --source .\output\specification__docx
+docspecbridge md2jira --source .\output\specification__docx --project ABC --issue-type Story
+
+docspecbridge jira-projects
+docspecbridge jira-issue-types --project ABC
+docspecbridge jira-issues --project ABC --type Story
+
+docspecbridge doc2rag
+docspecbridge rag-export
+
+docspecbridge config
+docspecbridge config-show
+docspecbridge config-keys
+```
+
+## Diagnostics
+
+Run:
+
+```powershell
 docspecbridge doctor
 ```
 
-Python `>=3.10` is supported. XLSX support adds `openpyxl>=3.1,<4`.
+Doctor reports the DocSpecBridge/Python/platform versions, key dependency versions, working directories, proxy presence and configured Confluence instances/token environment status.
 
-## Current limits
+## Development
 
-- Arbitrary Word/PowerPoint DrawingML/VML/SmartArt still cannot be rendered losslessly without an Office-class layout engine.
-- XLSX chart previews cover common chart families; uncommon/compound Excel chart types remain preserved as workbook/chart metadata and in the original XLSX but may not get a visual preview.
-- `web2md` processes server-returned HTML and does not execute browser JavaScript.
-- Confluence macros with no canonical equivalent remain preserved in raw Storage Format but can be simplified in human Markdown.
-- Jira attachment insertion uses ADF external-media URLs backed by Jira attachment content URLs. The attachment itself remains authoritative even if a particular Jira renderer chooses to display that media as a link rather than an inline preview.
-- `conf2md` targets Confluence pages; whiteboards do not expose the same Storage Format fidelity through the page API.
+```powershell
+uv sync
+uv run pytest
+uv run ruff check .
+uv build --no-sources
+uvx twine check dist/*
+```
 
-### Navigation interactive 0.5.x
+The i18n test requires the English, French, German, Spanish and Chinese catalogs to contain the same translation-key set.
 
-Le menu interactif est organisé en **Paramétrage / Extract / Import / RAG / Aide** et suit la langue choisie dans `app.language` (`fr`, `en`, `de`, `es`, `zh`).
+## Release history
 
-Les flux Confluence utilisent systématiquement la découverte **instance -> espace -> page**. Les valeurs par défaut servent à pré-positionner les sélecteurs mais restent visibles et modifiables. Pour l'extraction Jira, l'utilisateur choisit d'abord entre **saisie directe de la clé** et **découverte**. La découverte suit **instance -> projet -> type de ticket -> liste paginée des tickets**. Les valeurs Jira par défaut peuvent être configurées dans **Paramétrage > Jira Cloud**.
-
-À toute étape interactive, **Esc** annule l'action en cours et revient au menu précédent.
-
-### Formats sources et migration 0.5.1
-
-Les formats sources pris en charge sont désormais une capacité interne de DocSpecBridge : DOCX, PDF, PPTX, XLSX, HTML/HTM et Markdown. Ils ne sont plus stockés dans `docspecbridge.yaml`. Une ancienne clé `app.extensions` est acceptée à la lecture pour compatibilité mais ignorée puis supprimée lors d'une sauvegarde. Cela évite qu'un ancien YAML masque un format ajouté par une nouvelle version.
-
-Pour un filtrage ponctuel, la CLI conserve `--extension/-e` (répétable) sans modifier la configuration persistante.
-
-Pour Jira, l'export des commentaires combine l'API Jira Platform et, lorsque nécessaire, le mécanisme Jira Service Management. Le package contient toujours `<ISSUE>.comments.json` lorsque `jira.export.include_comments` est activé, ce qui facilite le diagnostic des droits d'accès.
+See [CHANGELOG.md](CHANGELOG.md).

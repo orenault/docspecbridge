@@ -1,3 +1,9 @@
+docspecbridge:
+  # Configuration schema used for automatic migrations.
+  config_schema_version: 2
+  # Informational: DocSpecBridge version that last wrote/migrated this file.
+  last_updated_by: "0.5.4"
+
 app:
   # fr / en / de / es / zh. On first run DocSpecBridge detects the OS language.
   language: fr
@@ -135,8 +141,6 @@ confluence:
   keep_hierarchy: false
   overwrite_manual_changes: false
   comments: "remove"          # remove | check-open
-  # Kept only for backward-compatible YAML loading. 0.5.x never mutates generated publication Markdown.
-  write_page_id_to_markdown: false
   heading_anchors: true
 
   publication:
@@ -168,7 +172,6 @@ confluence:
     skip_title_heading: false
     prefer_raster: true
     render_drawio: false
-    render_mermaid: false
     render_plantuml: false
     render_latex: false
     diagram_output_format: "png"
@@ -177,8 +180,6 @@ confluence:
     use_panel: false
     force_valid_language: true
 
-  # Deprecated compatibility key. Prefer confluence.converter.render_mermaid.
-  render_mermaid: false
 
 canonical:
   schema_version: "1.0"
@@ -191,7 +192,7 @@ html:
     download_images: true
     copy_local_images: true
     timeout_seconds: 30
-    user_agent: "DocSpecBridge/0.5.1"
+    user_agent: "DocSpecBridge/0.5.4"
 
 jira:
   # Optional. If instances is empty, jira2md/md2jira reuse Confluence instance credentials.

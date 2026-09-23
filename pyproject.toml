@@ -1,6 +1,6 @@
 [project]
 name = "docspecbridge"
-version = "0.5.1"
+version = "0.5.4"
 description = "Canonical specification bridge: Office/PDF/HTML/Markdown/Confluence/Jira -> Markdown, HTML, RAG, Confluence and Jira"
 readme = "README.md"
 requires-python = ">=3.10"

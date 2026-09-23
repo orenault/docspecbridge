@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import shutil
 from typing import Any
 from urllib.parse import urlparse
 
 import yaml
 
-from .i18n import detect_os_language, normalize_language
+from . import __version__
+from .i18n import detect_os_language, normalize_language, tr
 
+
+CURRENT_CONFIG_SCHEMA_VERSION = 2
 
 # Source formats supported by the application. This is product capability, not user configuration.
 SUPPORTED_SOURCE_EXTENSIONS: tuple[str, ...] = (
@@ -17,6 +21,10 @@ SUPPORTED_SOURCE_EXTENSIONS: tuple[str, ...] = (
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "docspecbridge": {
+        "config_schema_version": CURRENT_CONFIG_SCHEMA_VERSION,
+        "last_updated_by": __version__,
+    },
     "app": {
         "language": "auto",
         "source": "./input",
@@ -126,7 +134,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "download_images": True,
             "copy_local_images": True,
             "timeout_seconds": 30,
-            "user_agent": "DocSpecBridge/0.5.1",
+            "user_agent": f"DocSpecBridge/{__version__}",
         },
     },
     "jira": {
@@ -171,9 +179,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keep_hierarchy": False,
         "overwrite_manual_changes": False,
         "comments": "remove",
-        # DocSpecBridge keeps publication identity in publication_state.json instead
-        # of mutating generated publication Markdown with a destination-specific page ID.
-        "write_page_id_to_markdown": False,
         "publication": {
             "default_mode": "replace",
             "page_title_source": "document_title",
@@ -205,8 +210,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "use_panel": False,
             "force_valid_language": True,
         },
-        # Legacy key kept for backward compatibility with 0.2.1 YAML files.
-        "render_mermaid": False,
     },
 }
 
@@ -265,6 +268,7 @@ def _migrate_instance(instance: dict[str, Any]) -> dict[str, Any]:
 
 
 def _migrate_legacy(data: dict[str, Any]) -> dict[str, Any]:
+    """Migrate the unversioned/legacy configuration shape to schema 2."""
     data = deepcopy(data)
 
     legacy_rag = data.pop("rag", None)
@@ -275,16 +279,8 @@ def _migrate_legacy(data: dict[str, Any]) -> dict[str, Any]:
     cf = data.get("confluence")
     if isinstance(cf, dict) and not cf.get("instances"):
         legacy_keys = {
-            "domain",
-            "base_path",
-            "api_url",
-            "user_name",
-            "token_env",
-            "api_version",
-            "default_space",
-            "root_page",
-            "auth_type",
-            "cloud_id",
+            "domain", "base_path", "api_url", "user_name", "token_env", "api_version",
+            "default_space", "root_page", "auth_type", "cloud_id",
         }
         if any(cf.get(key) not in (None, "") for key in legacy_keys):
             instance = {key: cf.get(key) for key in legacy_keys if key in cf}
@@ -296,19 +292,102 @@ def _migrate_legacy(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(cf, dict):
         instances = cf.get("instances") or {}
         cf["instances"] = {str(name): _migrate_instance(dict(value or {})) for name, value in instances.items()}
+        legacy_mermaid = cf.pop("render_mermaid", None)
+        converter = cf.setdefault("converter", {})
+        if legacy_mermaid is not None and "render_mermaid" not in converter:
+            converter["render_mermaid"] = bool(legacy_mermaid)
+        # Page identity is state-only; this legacy setting no longer changes output.
+        cf.pop("write_page_id_to_markdown", None)
 
     app = data.setdefault("app", {})
-
-    # 0.5.1: supported source formats are application capabilities, not configuration.
-    # Older YAML files may contain app.extensions (including custom lists). Ignore and
-    # remove that legacy key so an old configuration can never hide a newly supported
-    # source format such as XLSX. Ad-hoc filtering remains available through CLI -e.
+    # Source formats are product capabilities, not persistent configuration.
     app.pop("extensions", None)
-
     lang = str(app.get("language") or "auto").strip().lower()
     if lang == "sp":
         app["language"] = "es"
+
+    data["docspecbridge"] = {
+        "config_schema_version": CURRENT_CONFIG_SCHEMA_VERSION,
+        "last_updated_by": __version__,
+    }
     return data
+
+
+def _config_schema_version(data: dict[str, Any]) -> int:
+    meta = data.get("docspecbridge")
+    if not isinstance(meta, dict) or meta.get("config_schema_version") in (None, ""):
+        return 1
+    try:
+        return int(meta.get("config_schema_version"))
+    except (TypeError, ValueError) as exc:
+        lang_cfg = {"app": {"language": str((data.get("app") or {}).get("language") or "auto")}}
+        raise ValueError(tr(lang_cfg, "config.invalid_schema", value=meta.get("config_schema_version"))) from exc
+
+
+def _backup_path(path: Path) -> Path:
+    base = path.with_name(path.name + f".pre-{__version__}.bak")
+    if not base.exists():
+        return base
+    index = 2
+    while True:
+        candidate = path.with_name(path.name + f".pre-{__version__}.{index}.bak")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _write_config_file(path: Path, data: dict[str, Any]) -> None:
+    serialized = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
+    temp = path.with_name(f".{path.name}.docspecbridge.tmp")
+    try:
+        temp.write_text(serialized, encoding="utf-8")
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _migrate_config_file(path: Path, data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Apply sequential configuration schema migrations and persist them atomically enough for local use.
+
+    Schema 1 represents every pre-0.5.2 YAML file (no explicit schema marker). Schema 2
+    introduces the top-level ``docspecbridge`` metadata and consolidates the legacy
+    migrations that were previously performed only in memory.
+    """
+    schema = _config_schema_version(data)
+    if schema > CURRENT_CONFIG_SCHEMA_VERSION:
+        lang_cfg = {"app": {"language": str((data.get("app") or {}).get("language") or "auto")}}
+        raise RuntimeError(tr(
+            lang_cfg,
+            "config.schema_too_new",
+            current=schema,
+            supported=CURRENT_CONFIG_SCHEMA_VERSION,
+        ))
+    if schema == CURRENT_CONFIG_SCHEMA_VERSION:
+        return data, None
+
+    original_schema = schema
+    migrated = deepcopy(data)
+    while schema < CURRENT_CONFIG_SCHEMA_VERSION:
+        if schema == 1:
+            migrated = _migrate_legacy(migrated)
+            schema = 2
+        else:  # pragma: no cover - defensive future-proofing
+            raise RuntimeError(tr({"app": {"language": str((migrated.get("app") or {}).get("language") or "auto")}}, "config.migration_missing", schema=schema))
+
+    # Persist the complete current structure, not only keys that happened to exist in
+    # the old file. This makes the YAML itself self-describing and immediately current.
+    migrated = _deep_merge(DEFAULT_CONFIG, migrated)
+    migrated.setdefault("docspecbridge", {})["config_schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
+    migrated["docspecbridge"]["last_updated_by"] = __version__
+    backup = _backup_path(path)
+    shutil.copy2(path, backup)
+    _write_config_file(path, migrated)
+    return migrated, {
+        "from_schema": original_schema,
+        "to_schema": CURRENT_CONFIG_SCHEMA_VERSION,
+        "backup": str(backup),
+        "path": str(path),
+    }
 
 
 def find_default_config() -> Path | None:
@@ -323,7 +402,7 @@ def selected_config_path(path: Path | None = None) -> Path:
     return (path or find_default_config() or (Path.cwd() / "docspecbridge.yaml")).resolve()
 
 
-def load_config(path: Path | None = None) -> dict[str, Any]:
+def load_config(path: Path | None = None, *, auto_migrate: bool = True) -> dict[str, Any]:
     selected = path or find_default_config()
     if selected is None:
         cfg = deepcopy(DEFAULT_CONFIG)
@@ -332,10 +411,31 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     with selected.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
-        raise ValueError(f"Configuration YAML invalide: {selected}")
-    cfg = _deep_merge(DEFAULT_CONFIG, _migrate_legacy(data))
+        temp = {"app": {"language": "auto"}}
+        raise ValueError(tr(temp, "config.invalid_yaml", path=selected))
+
+    migration_info = None
+    if auto_migrate:
+        data, migration_info = _migrate_config_file(selected, data)
+    else:
+        schema = _config_schema_version(data)
+        if schema < CURRENT_CONFIG_SCHEMA_VERSION:
+            data = _migrate_legacy(data)
+        elif schema > CURRENT_CONFIG_SCHEMA_VERSION:
+            # Help text must remain available even if the on-disk config is newer.
+            data = deepcopy(DEFAULT_CONFIG)
+
+    cfg = _deep_merge(DEFAULT_CONFIG, data)
+    # Normalize instances in memory even for already-current schemas.
+    cf = cfg.get("confluence") or {}
+    if isinstance(cf, dict):
+        instances = cf.get("instances") or {}
+        cf["instances"] = {str(name): _migrate_instance(dict(value or {})) for name, value in instances.items()}
+    cfg.setdefault("docspecbridge", {})["config_schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
     configured_language = str(cfg["app"].get("language") or "auto").strip().lower()
     cfg["app"]["language"] = detect_os_language() if configured_language in {"", "auto"} else normalize_language(configured_language)
+    if migration_info:
+        cfg.setdefault("_runtime", {})["config_migration"] = migration_info
     return cfg
 
 
@@ -345,10 +445,15 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     persisted = deepcopy(config)
     persisted.pop("_runtime", None)
     (persisted.get("app") or {}).pop("extensions", None)
-    selected.write_text(
-        yaml.safe_dump(persisted, allow_unicode=True, sort_keys=False, width=120),
-        encoding="utf-8",
-    )
+    cf = persisted.get("confluence") or {}
+    cf.pop("write_page_id_to_markdown", None)
+    legacy_mermaid = cf.pop("render_mermaid", None)
+    if legacy_mermaid is not None:
+        cf.setdefault("converter", {}).setdefault("render_mermaid", bool(legacy_mermaid))
+    meta = persisted.setdefault("docspecbridge", {})
+    meta["config_schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
+    meta["last_updated_by"] = __version__
+    _write_config_file(selected, persisted)
     ensure_workdirs(persisted)
     return selected
 

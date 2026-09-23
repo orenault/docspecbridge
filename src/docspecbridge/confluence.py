@@ -325,7 +325,7 @@ def _publication_state_path(md: Path) -> Path:
 def _load_publication_state(md: Path) -> dict[str, Any]:
     path = _publication_state_path(md)
     if not path.is_file():
-        return {"schema_version": "1.0", "confluence": []}
+        return {"schema_version": "1.1", "confluence": []}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -334,29 +334,38 @@ def _load_publication_state(md: Path) -> dict[str, Any]:
             return data
     except Exception:
         pass
-    return {"schema_version": "1.0", "confluence": []}
+    return {"schema_version": "1.1", "confluence": []}
 
 
 def _state_entry(
     md: Path, *, instance_name: str, space_key: str, parent_id: str
 ) -> dict[str, Any] | None:
-    """Return the primary replace-target for this package/location.
+    """Return the safest primary replace target known for this package.
 
-    `add` publications are retained as copies in state but never become the implicit
-    target of a later `replace`. Legacy 0.4.2-state rows without `role` are treated as
-    primary for backward compatibility.
+    Stable Confluence page identity is stronger than generated filenames or the current
+    interactive destination. Prefer an exact source/location match, but if only one
+    primary publication exists for the selected instance, return it even when the user
+    selected a different space/parent so the caller can stop on a location mismatch
+    instead of accidentally creating a duplicate.
     """
     source_name = md.name
-    for item in _load_publication_state(md).get("confluence") or []:
-        role = str(item.get("role") or "primary")
-        if (
-            role == "primary"
-            and str(item.get("instance") or "") == instance_name
-            and str(item.get("space") or "") == space_key
-            and str(item.get("parent_id") or "") == parent_id
-            and str(item.get("source") or source_name) == source_name
-        ):
-            return dict(item)
+    rows = [
+        dict(item)
+        for item in (_load_publication_state(md).get("confluence") or [])
+        if str(item.get("role") or "primary") == "primary"
+        and str(item.get("instance") or "") == instance_name
+    ]
+    same_space = [item for item in rows if str(item.get("space") or "") == space_key]
+    same_location = [item for item in same_space if str(item.get("parent_id") or "") == parent_id]
+    exact_source = [item for item in same_location if str(item.get("source") or source_name) == source_name]
+    if len(exact_source) == 1:
+        return exact_source[0]
+    if len(same_location) == 1:
+        return same_location[0]
+    if len(same_space) == 1:
+        return same_space[0]
+    if len(rows) == 1:
+        return rows[0]
     return None
 
 
@@ -410,6 +419,7 @@ def _save_publication_state(
                 break
     if not replaced:
         rows.append(new_item)
+    state["schema_version"] = "1.1"
     state["confluence"] = rows
     _publication_state_path(md).write_text(
         json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -631,23 +641,36 @@ def prepare_publication_target(
 
     state = _state_entry(md, instance_name=instance_name, space_key=space_key, parent_id=parent_id)
     target_id = str((state or {}).get("page_id") or "").strip()
-    if target_id:
+    if state is not None:
+        if not target_id:
+            raise RuntimeError(tr(config, "publication.state_missing_page_id", source=md.parent.name))
         target = _get_page_by_id(instance, target_id)
-        if target is not None:
-            same_space = str(target.get("spaceId") or "") == space_id
-            same_parent = str(target.get("parentId") or "") == parent_id
-            if same_space and same_parent:
-                conflicts = [
-                    page for page in _find_pages_by_title(instance, space_id, title)
-                    if str(page.get("id") or "") != target_id
-                ]
-                if conflicts:
-                    other = conflicts[0]
-                    raise RuntimeError(
-                        f"Conflit de titre dans l'espace {space_key}: '{title}' existe déjà "
-                        f"(ID {other.get('id')}, parent {other.get('parentId')})."
-                    )
-                return title, target_id, "update"
+        if target is None:
+            raise RuntimeError(tr(config, "publication.state_page_missing", page_id=target_id))
+        same_space = str(target.get("spaceId") or "") == space_id
+        same_parent = str(target.get("parentId") or "") == parent_id
+        if not same_space or not same_parent:
+            raise RuntimeError(tr(
+                config,
+                "publication.state_location_mismatch",
+                page_id=target_id,
+                space=space_key,
+                parent=parent_id,
+            ))
+        conflicts = [
+            page for page in _find_pages_by_title(instance, space_id, title)
+            if str(page.get("id") or "") != target_id
+        ]
+        if conflicts:
+            other = conflicts[0]
+            raise RuntimeError(tr(
+                config,
+                "publication.title_conflict",
+                title=title,
+                page_id=other.get("id"),
+                parent=other.get("parentId"),
+            ))
+        return title, target_id, "update"
 
     matches = _find_pages_by_title(instance, space_id, title)
     if not matches:

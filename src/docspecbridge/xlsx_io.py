@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
 
 from .canonical import new_document, validate_document
+from .i18n import tr
 from .package_io import write_canonical_package
 from .utils import safe_stem, write_json
 
@@ -166,42 +167,54 @@ def _render_chart_svg(chart: Any, workbook_values, path: Path) -> dict[str, Any]
 
 
 def extract_xlsx_to_package(path: Path, package_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Extract an XLSX workbook into one publication package or a workbook hierarchy.
+
+    A one-sheet workbook is represented directly by the root package: publishing it
+    creates one page containing the worksheet. A multi-sheet workbook gets a root
+    index page plus one child package per worksheet. The root index is target-aware:
+    human Markdown links to child Markdown, local HTML links to child HTML and the
+    Confluence renderer emits the dynamic child-pages listing marker.
+    """
     formula_wb = load_workbook(path, data_only=False, read_only=False)
     values_wb = load_workbook(path, data_only=True, read_only=False)
     stem = safe_stem(path.stem)
     profiles = config.get("profiles") or {}
     rag_profile = profiles.get("rag") or {}
     publication_profile = profiles.get("publication") or {}
-
-    root = new_document(
-        title=path.stem,
-        source={"type": "xlsx", "original_path": str(path), "extension": ".xlsx", "sheet_count": len(formula_wb.sheetnames)},
-    )
-    root["blocks"] = [
-        {"type": "heading", "level": 1, "inlines": [{"type": "text", "text": path.stem, "marks": []}]},
-        {"type": "paragraph", "inlines": [{"type": "text", "text": f"Workbook Excel — {len(formula_wb.sheetnames)} worksheet(s)", "marks": []}]},
-        {"type": "list", "ordered": False, "start": 1, "items": [
-            {"blocks": [{"type": "paragraph", "inlines": [{"type": "text", "text": name, "marks": []}]}]}
-            for name in formula_wb.sheetnames
-        ]},
-    ]
-    root_outputs = write_canonical_package(root, package_dir, stem=stem, rag_profile=rag_profile, publication_profile=publication_profile)
+    sheet_names = list(formula_wb.sheetnames)
+    workbook_title = str(getattr(formula_wb.properties, "title", None) or "").strip() or path.stem
 
     workbook_meta: dict[str, Any] = {"source": path.name, "sheets": [], "defined_names": []}
     for item in formula_wb.defined_names.values():
         workbook_meta["defined_names"].append({"name": item.name, "value": item.attr_text})
 
-    children: list[dict[str, Any]] = []
-    for sheet_index, ws in enumerate(formula_wb.worksheets, 1):
-        values_ws = values_wb[ws.title]
-        sheet_stem = safe_stem(ws.title) or f"sheet-{sheet_index}"
-        child_dir = package_dir / "sheets" / f"{sheet_index:02d}-{sheet_stem}"
-        child_dir.mkdir(parents=True, exist_ok=True)
-        doc = new_document(
-            title=ws.title,
-            source={"type": "xlsx-sheet", "workbook": path.name, "worksheet": ws.title, "worksheet_index": sheet_index},
-        )
-        doc["blocks"].append({"type": "heading", "level": 1, "inlines": [{"type": "text", "text": ws.title, "marks": []}]})
+    def build_sheet(
+        ws,
+        values_ws,
+        *,
+        target_dir: Path,
+        output_stem: str,
+        sheet_index: int,
+        document_title: str | None = None,
+        root_source: bool = False,
+    ) -> tuple[dict[str, Path | None], dict[str, Any]]:
+        source_meta = {
+            "type": "xlsx" if root_source else "xlsx-sheet",
+            "workbook": path.name,
+            "original_path": str(path),
+            "extension": ".xlsx",
+            "worksheet": ws.title,
+            "worksheet_index": sheet_index,
+            "sheet_count": len(sheet_names),
+        }
+        doc = new_document(title=document_title or ws.title, source=source_meta)
+        # Keep the worksheet name visible even when the single-page Confluence title
+        # comes from the workbook/document title.
+        doc["blocks"].append({
+            "type": "heading", "level": 1,
+            "inlines": [{"type": "text", "text": ws.title, "marks": []}],
+        })
+
         formula_meta: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
         max_row = ws.max_row or 0
@@ -220,7 +233,7 @@ def extract_xlsx_to_package(path: Path, package_dir: Path, config: dict[str, Any
                         "cached_value_missing": cached is None,
                     })
                     if cached is None:
-                        display = f"{cell.value} [cached result unavailable]"
+                        display = tr(config, "xlsx.cached_unavailable", formula=cell.value)
                 cells.append({
                     "type": "table_cell", "header": r == 1, "colspan": 1, "rowspan": 1, "style": {},
                     "blocks": _cell_blocks(_text(display)),
@@ -229,37 +242,121 @@ def extract_xlsx_to_package(path: Path, package_dir: Path, config: dict[str, Any
         if rows and max_col:
             doc["blocks"].append({"type": "table", "rows": rows, "logical_columns": max_col})
         else:
-            doc["blocks"].append({"type": "paragraph", "inlines": [{"type": "text", "text": "(empty worksheet)", "marks": []}]})
+            doc["blocks"].append({
+                "type": "paragraph",
+                "inlines": [{"type": "text", "text": tr(config, "xlsx.empty_worksheet"), "marks": []}],
+            })
 
         chart_meta: list[dict[str, Any]] = []
         for chart_index, chart in enumerate(getattr(ws, "_charts", []) or [], 1):
-            svg = child_dir / "images" / f"chart_{chart_index:03d}.svg"
+            svg = target_dir / "images" / f"chart_{chart_index:03d}.svg"
             meta = _render_chart_svg(chart, values_wb, svg)
             chart_meta.append(meta)
             if meta.get("preview"):
                 rel = str(Path("images") / svg.name).replace("\\", "/")
                 doc["assets"].append({"role": "chart", "file": rel, "saved": True, "mime_type": "image/svg+xml"})
-                doc["blocks"].append({"type": "image", "src": rel, "alt": str(meta.get("title") or f"Chart {chart_index}"), "role": "chart"})
+                doc["blocks"].append({
+                    "type": "image", "src": rel,
+                    "alt": str(meta.get("title") or f"Chart {chart_index}"), "role": "chart",
+                })
 
         validate_document(doc)
-        outputs = write_canonical_package(doc, child_dir, stem=sheet_stem, rag_profile=rag_profile, publication_profile=publication_profile)
+        outputs = write_canonical_package(
+            doc, target_dir, stem=output_stem,
+            rag_profile=rag_profile, publication_profile=publication_profile,
+        )
         sheet_meta = {
-            "name": ws.title, "index": sheet_index, "max_row": max_row, "max_column": max_col,
-            "formulas": formula_meta, "charts": chart_meta,
-            "package": str(child_dir.relative_to(package_dir)).replace("\\", "/"),
+            "name": ws.title,
+            "index": sheet_index,
+            "max_row": max_row,
+            "max_column": max_col,
+            "formulas": formula_meta,
+            "charts": chart_meta,
         }
+        return outputs, sheet_meta
+
+    # One worksheet: the root package *is* the worksheet page. There is no artificial
+    # workbook landing page and therefore no child hierarchy to publish.
+    if len(sheet_names) == 1:
+        ws = formula_wb.worksheets[0]
+        outputs, sheet_meta = build_sheet(
+            ws, values_wb[ws.title], target_dir=package_dir, output_stem=stem,
+            sheet_index=1, document_title=workbook_title, root_source=True,
+        )
+        sheet_meta["package"] = "."
+        workbook_meta["sheets"].append(sheet_meta)
+        write_json(package_dir / f"{stem}.workbook.json", workbook_meta)
+        manifest_path = package_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["xlsx"] = {
+            "workbook_metadata": f"{stem}.workbook.json",
+            "single_sheet": True,
+            "worksheet": ws.title,
+            "children": [],
+        }
+        manifest["children"] = []
+        write_json(manifest_path, manifest)
+        return {"root": outputs, "children": [], "metadata": workbook_meta}
+
+    # Multi-sheet workbook: create each worksheet package first so the landing page can
+    # contain real relative links to the generated local Markdown/HTML artifacts.
+    children: list[dict[str, Any]] = []
+    for sheet_index, ws in enumerate(formula_wb.worksheets, 1):
+        values_ws = values_wb[ws.title]
+        sheet_stem = safe_stem(ws.title) or f"sheet-{sheet_index}"
+        child_dir = package_dir / "sheets" / f"{sheet_index:02d}-{sheet_stem}"
+        child_dir.mkdir(parents=True, exist_ok=True)
+        outputs, sheet_meta = build_sheet(
+            ws, values_ws, target_dir=child_dir, output_stem=sheet_stem,
+            sheet_index=sheet_index,
+        )
+        package_rel = str(child_dir.relative_to(package_dir)).replace("\\", "/")
+        sheet_meta["package"] = package_rel
         workbook_meta["sheets"].append(sheet_meta)
         children.append({
             "title": ws.title,
-            "package": sheet_meta["package"],
+            "package": package_rel,
             "manifest": str((child_dir / "manifest.json").relative_to(package_dir)).replace("\\", "/"),
+            "human_markdown": str(outputs["human_markdown"].relative_to(package_dir)).replace("\\", "/"),
+            "html": str(outputs["html"].relative_to(package_dir)).replace("\\", "/"),
             "publication_markdown": str(outputs["confluence_markdown"].relative_to(package_dir)).replace("\\", "/"),
         })
+
+    root = new_document(
+        title=workbook_title,
+        source={"type": "xlsx", "original_path": str(path), "extension": ".xlsx", "sheet_count": len(sheet_names)},
+    )
+    root["blocks"] = [
+        {"type": "heading", "level": 1, "inlines": [{"type": "text", "text": workbook_title, "marks": []}]},
+        {"type": "paragraph", "inlines": [{
+            "type": "text",
+            "text": tr(config, "xlsx.workbook_summary", count=len(sheet_names)),
+            "marks": [],
+        }]},
+        {"type": "heading", "level": 2, "inlines": [{"type": "text", "text": tr(config, "xlsx.contents"), "marks": []}]},
+        {"type": "child_pages", "items": [
+            {
+                "title": child["title"],
+                "markdown_href": child["human_markdown"],
+                "html_href": child["html"],
+                "package": child["package"],
+            }
+            for child in children
+        ]},
+    ]
+    root_outputs = write_canonical_package(
+        root, package_dir, stem=stem,
+        rag_profile=rag_profile, publication_profile=publication_profile,
+    )
 
     write_json(package_dir / f"{stem}.workbook.json", workbook_meta)
     manifest_path = package_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["xlsx"] = {"workbook_metadata": f"{stem}.workbook.json", "children": children}
+    manifest["xlsx"] = {
+        "workbook_metadata": f"{stem}.workbook.json",
+        "single_sheet": False,
+        "children": children,
+    }
     manifest["children"] = children
     write_json(manifest_path, manifest)
     return {"root": root_outputs, "children": children, "metadata": workbook_meta}

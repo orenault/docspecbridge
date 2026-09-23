@@ -400,6 +400,8 @@ def block_plain_text(block: dict[str, Any]) -> str:
         return inline_plain_text(block.get("inlines") or [])
     if kind == "code_block":
         return str(block.get("text") or "")
+    if kind == "diagram":
+        return str(block.get("mermaid") or "")
     if kind == "image":
         return str(block.get("alt") or "")
     return ""
