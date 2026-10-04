@@ -29,6 +29,8 @@ from .i18n import tr
 from .package_io import write_canonical_package
 from .title_detection import apply_detected_title
 from .xlsx_io import extract_xlsx_to_package
+from .csv_io import canonical_from_csv
+from .text_io import canonical_from_plain_text
 
 
 # Xberg sometimes escapes image markers as `\![...](...)`, notably for PPTX.
@@ -37,6 +39,56 @@ IMAGE_RE = re.compile(r"(?P<escaped>\\?)!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\
 EMBEDDED_RE = re.compile(r"^embedded:(?P<token>.+)$")
 XBERG_LOCAL_IMAGE_RE = re.compile(r"^(?:\./)?(?:.*/)?image_(?P<index>\d+)(?:\.[A-Za-z0-9]+)?$")
 HTML_IMAGE_RE = re.compile(r"<img\b[^>]*?\bsrc=[\"\'](?P<target>[^\"\']+)[\"\'][^>]*/?>", re.I)
+
+MARKDOWN_LOCAL_IMAGE_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
+
+
+def _prepare_markdown_assets(markdown: str, source: Path, package_dir: Path) -> tuple[str, list[dict[str, Any]], list[str]]:
+    """Copy relative local Markdown images into the package and rewrite their links."""
+    from urllib.parse import unquote
+
+    images_dir = package_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    assets: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    seen: dict[Path, str] = {}
+
+    def replace(match: re.Match[str]) -> str:
+        target = match.group("target").strip()
+        alt = match.group("alt")
+        raw_target = target[1:-1] if target.startswith("<") and target.endswith(">") else target
+        if raw_target.startswith(("http://", "https://", "data:", "#", "/")):
+            return match.group(0)
+        if re.match(r"^[A-Za-z]:[\\/]", raw_target):
+            candidate = Path(unquote(raw_target))
+        else:
+            candidate = (source.parent / unquote(raw_target)).resolve()
+        if not candidate.is_file():
+            warnings.append(f"Markdown local image not found: {raw_target}")
+            return match.group(0)
+        if candidate in seen:
+            rel = seen[candidate]
+        else:
+            suffix = candidate.suffix.lower() or ".bin"
+            base = safe_stem(candidate.stem) or "image"
+            dest = images_dir / f"{base}{suffix}"
+            counter = 2
+            while dest.exists() and dest.read_bytes() != candidate.read_bytes():
+                dest = images_dir / f"{base}_{counter}{suffix}"
+                counter += 1
+            if not dest.exists():
+                shutil.copy2(candidate, dest)
+            rel = str(Path("images") / dest.name).replace("\\", "/")
+            seen[candidate] = rel
+            assets.append({
+                "role": "body", "file": rel, "saved": True,
+                "source_name": candidate.name, "source_path": str(candidate),
+                "sha256": sha256_file(candidate),
+            })
+        return f"![{alt}]({rel})"
+
+    return MARKDOWN_LOCAL_IMAGE_RE.sub(replace, markdown), assets, warnings
+
 
 
 def _publication_front_matter(markdown: str, title: str) -> str:
@@ -230,6 +282,29 @@ class XbergExtractor:
                 if source.resolve() != source_copy.resolve():
                     shutil.copy2(source, source_copy)
 
+            # CSV/TXT are handled natively: simple structured/text sources do not
+            # need a heavyweight office extractor.
+            if source.suffix.lower() in {".csv", ".txt"}:
+                profiles_cfg = self.config.get("profiles") or {}
+                publication_cfg = profiles_cfg.get("publication") or {}
+                rag_cfg = profiles_cfg.get("rag") or {}
+                if source.suffix.lower() == ".csv":
+                    doc, native_meta = canonical_from_csv(source)
+                else:
+                    doc, native_meta = canonical_from_plain_text(source)
+                doc.setdefault("source", {})["packaged_file"] = source_copy.name if app_cfg.get("copy_source", True) else None
+                apply_detected_title(doc, source)
+                outputs = write_canonical_package(
+                    doc, package_dir, stem=safe_stem(source.stem),
+                    rag_profile=rag_cfg, publication_profile=publication_cfg,
+                    warnings=outcome.warnings, source_sha256=sha256_file(source),
+                    extra_manifest={"engine": "canonical-native", "native_text": native_meta},
+                )
+                outcome.markdown = outputs["human_markdown"]
+                if images_dir.is_dir():
+                    outcome.images.extend(sorted(p for p in images_dir.iterdir() if p.is_file()))
+                return outcome
+
             # XLSX is handled natively to preserve worksheet boundaries, formulas and charts.
             if source.suffix.lower() == ".xlsx":
                 result = extract_xlsx_to_package(source, package_dir, self.config)
@@ -255,13 +330,26 @@ class XbergExtractor:
                     outcome.warnings.extend(native_warnings)
                 else:
                     text = source.read_text(encoding="utf-8", errors="replace")
-                    doc = canonical_from_markdown(
-                        text, title=source.stem,
-                        source={
-                            "type": "markdown", "original_path": str(source), "extension": source.suffix.lower(),
-                            "packaged_file": source_copy.name if app_cfg.get("copy_source", True) else None,
-                        },
-                    )
+                    text, local_assets, local_warnings = _prepare_markdown_assets(text, source, package_dir)
+                    outcome.warnings.extend(local_warnings)
+                    runtime = self.config.get("_runtime") or {}
+                    git_context = runtime.get("git_context") or {}
+                    git_root = Path(str(runtime.get("git_root") or source.parent))
+                    try:
+                        relative_source = source.relative_to(git_root).as_posix() if git_context else str(source)
+                    except ValueError:
+                        relative_source = str(source)
+                    source_meta = {
+                        "type": "git-markdown" if git_context else "markdown",
+                        "original_path": relative_source,
+                        "extension": source.suffix.lower(),
+                        "packaged_file": source_copy.name if app_cfg.get("copy_source", True) else None,
+                    }
+                    if git_context:
+                        source_meta["repository"] = dict(git_context)
+                    doc = canonical_from_markdown(text, title=source.stem, source=source_meta)
+                    if local_assets:
+                        doc["assets"] = local_assets
                     apply_detected_title(doc, source)
                 outputs = write_canonical_package(
                     doc, package_dir, stem=safe_stem(source.stem),

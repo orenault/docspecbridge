@@ -1,28 +1,20 @@
 # DocSpecBridge
 
-DocSpecBridge is a canonical specification bridge for **DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence Cloud and Jira Cloud**.
+DocSpecBridge is a canonical specification bridge for **DOC/DOCX, PDF, PPT/PPTX, XLS/XLSX, CSV, TXT, ODF, HTML, Markdown, Git repositories, Web, Confluence Cloud and Jira Cloud**.
 
 It separates source extraction from target publication:
 
 ```mermaid
-flowchart LR
-    subgraph Sources
-      DOCX[DOCX]
-      PDF[PDF]
-      PPTX[PPTX]
-      XLSX[XLSX]
-      HTML[HTML / Markdown / Web]
-      CONF[Confluence]
-      JIRA[Jira]
-    end
-
-    Sources --> CAN[CanonicalDocument]
+flowchart TD
+    SRC["Sources<br/>DOC/DOCX · PDF · PPT/PPTX · XLS/XLSX · CSV · TXT · ODF<br/>HTML · Markdown · Git · Web · Confluence · Jira"]
+    SRC --> CAN[CanonicalDocument]
     CAN --> PKG[Portable package]
-    PKG --> MD[Human Markdown]
-    PKG --> RAG[RAG Markdown + chunks]
-    PKG --> WEB[Portable HTML]
-    PKG --> CFT[Confluence]
-    PKG --> JRT[Jira]
+    PKG --> OUT[Target-specific views]
+    OUT --> MD[Human Markdown]
+    OUT --> RAG[RAG Markdown + chunks]
+    OUT --> WEB[Portable HTML]
+    OUT --> CFT[Confluence]
+    OUT --> JRT[Jira]
 ```
 
 The canonical JSON is the structural source of truth. Markdown is a readable view, not the lossless pivot. This makes it possible to preserve information such as merged cells, image geometry, source metadata and target-specific rendering hints without polluting the RAG view.
@@ -67,6 +59,7 @@ Settings
 Extract
 Import
 RAG
+Web console
 Help
 Quit
 ```
@@ -83,6 +76,20 @@ Menus, prompts, help text, status messages, warnings and application-level error
 
 In interactive selectors, use arrow keys to navigate, **Enter** to confirm and **Esc** to cancel the current action and return to the previous menu.
 
+## Web console
+
+DocSpecBridge also provides a local browser UI backed only by Python's built-in HTTP server:
+
+```powershell
+docspecbridge web
+```
+
+The server listens on `127.0.0.1` only and opens the default browser. It exposes the same main workflows as the interactive CLI through tabs: **Home**, **Settings**, **Extract**, **Import**, **RAG** and **Help**. Processing results are returned as structured JSON and displayed as Web cards/tables instead of raw terminal output.
+
+The Web console language defaults to the browser language. It can be overridden independently in Settings with `web.language` (`auto`, `fr`, `en`, `de`, `es`, `zh`). `web.port` defaults to `8765`; when that port is busy DocSpecBridge tries the next local ports automatically.
+
+Tokens are never requested by the Web UI itself: Confluence, Jira, GitHub and GitLab continue to read credentials from the configured environment-variable names.
+
 ## Configuration
 
 DocSpecBridge looks for `docspecbridge.yaml`, `docspecbridge.yml`, `config.yaml` or `config.yml` in the current directory.
@@ -92,7 +99,7 @@ Configuration files carry explicit schema metadata:
 ```yaml
 docspecbridge:
   config_schema_version: 2
-  last_updated_by: "0.5.4"
+  last_updated_by: "0.5.7"
 ```
 
 `config_schema_version` controls structural migrations. `last_updated_by` records the DocSpecBridge version that last wrote or migrated the file.
@@ -107,7 +114,7 @@ When an older configuration schema is opened, DocSpecBridge:
 A backup is named similarly to:
 
 ```text
-docspecbridge.yaml.pre-0.5.4.bak
+docspecbridge.yaml.pre-0.5.7.bak
 ```
 
 If a configuration uses a schema newer than the running application supports, DocSpecBridge refuses to modify it and asks the user to upgrade the application.
@@ -122,7 +129,7 @@ Any configuration key can be overridden for one invocation:
 
 ```powershell
 docspecbridge --set profiles.rag.chunking.max_characters=2200 doc2rag
-docspecbridge --set confluence.converter.render_mermaid=true publish --source .\output\specification__docx
+docspecbridge --set git.recursive=false git2md --url https://github.com/acme/project
 ```
 
 Precedence is:
@@ -142,7 +149,7 @@ docspecbridge extract
 docspecbridge extract --source .\input --dest .\output
 ```
 
-Supported local sources include DOCX, PDF, PPTX, XLSX, HTML/HTM and Markdown.
+Supported local sources include DOC/DOCX/DOCM, PDF, PPT/PPTX/PPTM, XLS/XLSX/XLSM, ODT/ODS/ODP, RTF, TXT, CSV, HTML/HTM and Markdown. CSV and TXT use native lightweight adapters; current Office/OpenDocument formats use the appropriate native or Xberg path.
 
 A source such as `specification.docx` produces a self-contained package:
 
@@ -214,6 +221,28 @@ A workbook with multiple worksheets produces a workbook landing page plus one ch
 
 This keeps local packages navigable and lets Confluence reflect the actual child-page hierarchy after publication.
 
+## Git repositories
+
+The interactive Extract menu can read Markdown documentation directly from GitHub, GitLab.com or a self-managed GitLab repository. DocSpecBridge downloads a repository archive over HTTPS: **the `git` executable, SSH keys and a local clone are not required**.
+
+For public repositories, no token is required. For private repositories, optional token environment variables can be configured:
+
+```yaml
+git:
+  recursive: true
+  github_token_env: GITHUB_TOKEN
+  gitlab_token_env: GITLAB_TOKEN
+```
+
+`recursive: false` reads only Markdown files at the repository root. `recursive: true` also discovers Markdown in subdirectories. The repository default branch is used automatically unless a CLI `--ref` is supplied.
+
+```powershell
+docspecbridge git2md --url https://github.com/acme/project
+docspecbridge git2md --url https://gitlab.example.com/team/project --no-recursive
+```
+
+Relative local images referenced by Markdown are copied into each portable package so the resulting documentation no longer depends on the temporary repository download.
+
 ## Confluence Cloud
 
 Multiple Confluence Cloud instances are supported. Secrets are referenced through environment variables rather than stored in YAML.
@@ -245,6 +274,8 @@ Instance
 ```
 
 Configured defaults preselect the corresponding choice but never bypass discovery or hide the selected destination.
+
+The global Confluence setting **Hierarchy depth to discover** controls how many page-tree levels are loaded by page selectors. It is shared by Confluence extraction and publication discovery because both use the same page browser.
 
 CLI example:
 
@@ -285,6 +316,9 @@ Jira can be used both as an extraction source and an import target.
 
 Interactive extraction offers two paths:
 
+Project/type browsing keeps the Jira issue type ID internally and uses it in JQL while displaying the human-readable issue type name. This avoids ambiguity from renamed, translated or accented type names. If no issue is returned, DocSpecBridge displays the generated JQL for diagnosis. Existing Jira extraction packages are not silently overwritten.
+
+
 ```text
 Enter an issue key directly
 or
@@ -316,12 +350,13 @@ The interactive path discovers the Jira instance, project and issue type before 
 
 Local `.html` / `.htm` files placed directly in `input/` are processed through the same CanonicalDocument pipeline as other local sources. Markdown files are handled the same way. Remote web pages can be fetched with `web2md`; the server-returned HTML is preserved and referenced images can be downloaded into the package.
 
-Fenced Mermaid blocks in Markdown are recognized as semantic diagram blocks rather than generic source code. Human Markdown and RAG Markdown preserve the original `mermaid` fence, local HTML marks the diagram with a `mermaid` class for downstream/browser rendering, and Confluence publication passes a real Mermaid block to `markdown-to-confluence`. Confluence rendering behavior is controlled by `confluence.converter.render_mermaid`: pre-rendering requires Mermaid CLI (`mmdc`), while non-rendered Mermaid requires a compatible Confluence Marketplace integration.
+Fenced Mermaid blocks in Markdown are recognized as semantic diagram blocks rather than generic source code. Human Markdown and RAG Markdown preserve the original `mermaid` fence. DocSpecBridge also renders a portable PNG fallback with the Python `mermaidx` dependency, so HTML and Confluence output remain viewable even when the target does not execute Mermaid. **No Node.js, npm, Chromium or separate `mmdc` installation is required.** The Mermaid source remains in CanonicalDocument as the authoritative diagram definition.
 
 HTML extraction is currently semantic rather than a browser snapshot. Headings, paragraphs, lists, tables, links and images are normalized into the canonical model, while scripts and styles are deliberately not executed. As a result, JavaScript-heavy pages, iframe-driven content and layouts that depend strongly on CSS may lose runtime content or visual presentation. A future browser-rendered extraction mode can address those cases without changing the canonical publication pipeline.
 
 ```powershell
 docspecbridge web2md --url https://example.org/page
+docspecbridge git2md --url https://github.com/acme/project
 docspecbridge html2md --source .\page.html
 docspecbridge md2html --source .\page.md
 ```
@@ -350,6 +385,7 @@ docspecbridge extract --force-extract
 docspecbridge conf2md --page-id 123456789
 docspecbridge jira2md --issue ABC-123
 docspecbridge web2md --url https://example.org/page
+docspecbridge git2md --url https://github.com/acme/project
 
 docspecbridge publish --source .\output\specification__docx
 docspecbridge md2jira --source .\output\specification__docx --project ABC --issue-type Story
@@ -374,7 +410,7 @@ Run:
 docspecbridge doctor
 ```
 
-Doctor reports the DocSpecBridge/Python/platform versions, key dependency versions, working directories, proxy presence and configured Confluence instances/token environment status.
+Doctor reports the DocSpecBridge/Python/platform versions, key dependency versions (including the built-in Mermaid renderer), working directories, proxy presence and configured Confluence instances/token environment status.
 
 ## Development
 

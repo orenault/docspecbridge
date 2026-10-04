@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -36,6 +36,14 @@ jobs:
           echo "Git tag version:        $TAG_VERSION"
           test "$VERSION" = "$TAG_VERSION"
 
+      - name: Render Mermaid diagrams for the PyPI README
+        shell: bash
+        run: |
+          uv run --python 3.14 --no-project --with mermaidx==0.9.5 \
+            python .github/scripts/render_pypi_readme.py \
+            README.md .pypi "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "https://github.com"
+          cp .pypi/README.md README.md
+
       - name: Build distributions
         run: uv build --no-sources
 
@@ -49,6 +57,24 @@ jobs:
           test -n "$WHEEL"
           echo "Testing wheel: $WHEEL"
           uv run --python 3.14 --isolated --no-project --with "$WHEEL" docspecbridge doctor
+
+      - name: Publish README Mermaid images as GitHub release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(.pypi/readme-mermaid-*.png)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Mermaid images to publish"
+            exit 0
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --title "DocSpecBridge ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
 
       - name: Upload validated distributions
         uses: actions/upload-artifact@v4

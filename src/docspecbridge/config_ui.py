@@ -246,6 +246,10 @@ def _show_summary(cfg: dict[str, Any], path: Path) -> None:
     table.add_row("rag.chunks", str(bool((rag.get("chunking") or {}).get("enabled"))))
     table.add_row("rag.export.destination", str((cfg.get("rag_export") or {}).get("destination") or "./rag"))
     table.add_row("diagnostics.raw_xberg_md", str(bool((extract.get("diagnostics") or {}).get("keep_raw_xberg_markdown"))))
+    git_cfg = cfg.get("git") or {}
+    table.add_row("git.recursive", str(bool(git_cfg.get("recursive", True))))
+    table.add_row("git.github_token_env", str(git_cfg.get("github_token_env") or "GITHUB_TOKEN"))
+    table.add_row("git.gitlab_token_env", str(git_cfg.get("gitlab_token_env") or "GITLAB_TOKEN"))
     table.add_row("confluence.default_instance", str(cf.get("default_instance") or tr(cfg, "common.none")))
     table.add_row("confluence.keep_hierarchy", str(bool(cf.get("keep_hierarchy", False))))
     table.add_row("confluence.heading_anchors", str(bool(cf.get("heading_anchors", True))))
@@ -791,10 +795,39 @@ def _jira_settings_menu(cfg: dict[str, Any]) -> bool:
             cfg.update(snapshot)
             console.print(f"[dim]{tr(cfg, 'interactive.cancelled')}[/dim]")
 
+
+def _edit_git_settings(cfg: dict[str, Any]) -> bool:
+    git_cfg = cfg.setdefault("git", {})
+    git_cfg["recursive"] = _confirm(cfg, tr(cfg, "git.settings.recursive"), bool(git_cfg.get("recursive", True)))
+    git_cfg["github_token_env"] = _edit_text(
+        cfg, tr(cfg, "git.settings.github_token"), str(git_cfg.get("github_token_env") or "GITHUB_TOKEN"), allow_clear=True
+    )
+    git_cfg["gitlab_token_env"] = _edit_text(
+        cfg, tr(cfg, "git.settings.gitlab_token"), str(git_cfg.get("gitlab_token_env") or "GITLAB_TOKEN"), allow_clear=True
+    )
+    return True
+
+
+def _edit_confluence_discovery_depth(cfg: dict[str, Any]) -> bool:
+    selector = cfg.setdefault("confluence", {}).setdefault("page_selector", {})
+    depths = [0, 1, 2]
+    current_depth = max(0, min(2, int(selector.get("max_depth", 0))))
+    depth = _select_action(
+        tr(cfg, "settings.confluence_discovery_depth"),
+        [(value, str(value)) for value in depths],
+        default_index=current_depth,
+    )
+    if depth is None:
+        return False
+    depth = int(depth)
+    if depth == current_depth:
+        return False
+    selector["max_depth"] = depth
+    return True
+
 def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
     cf = cfg.setdefault("confluence", {})
     layout = cf.setdefault("layout", {})
-    selector = cf.setdefault("page_selector", {})
     publication = cf.setdefault("publication", {})
 
     modes = ["replace", "add"]
@@ -826,16 +859,6 @@ def _edit_confluence_publish(cfg: dict[str, Any]) -> bool:
     verify = _confirm(cfg, _field(cfg, "verify_publish"), bool(publication.get("verify_after_publish", True)))
     if verify is not None:
         publication["verify_after_publish"] = verify
-
-    depths = [0, 1, 2]
-    current_depth = max(0, min(2, int(selector.get("max_depth", 0))))
-    depth = _select_action(
-        _field(cfg, "page_depth"),
-        [(value, str(value)) for value in depths],
-        default_index=current_depth,
-    )
-    if depth is not None:
-        selector["max_depth"] = int(depth)
 
     widths = ["narrow", "wide", "max", "confluence-default"]
     current_width = str(cf.get("page_width") or "max")
@@ -924,9 +947,11 @@ def config_menu(path: Path | None = None) -> Path:
                 ("summary", tr(cfg, "settings.summary")),
                 ("language", tr(cfg, "settings.language")),
                 ("app", tr(cfg, "settings.app")),
+                ("git", tr(cfg, "settings.git")),
                 ("profiles", tr(cfg, "settings.profiles")),
                 ("instances", tr(cfg, "settings.instances")),
                 ("jira", tr(cfg, "jira.settings")),
+                ("confluence_depth", tr(cfg, "settings.confluence_discovery_depth")),
                 ("confluence_publish", tr(cfg, "settings.confluence_publish")),
                 ("doctor", tr(cfg, "settings.doctor")),
                 ("save", tr(cfg, "settings.save")),
@@ -946,12 +971,16 @@ def config_menu(path: Path | None = None) -> Path:
                 changed = _edit_language(cfg)
             elif choice == "app":
                 changed = _edit_app(cfg)
+            elif choice == "git":
+                changed = _edit_git_settings(cfg)
             elif choice == "profiles":
                 changed = _edit_profiles(cfg)
             elif choice == "instances":
                 changed = _instances_menu(cfg)
             elif choice == "jira":
                 changed = _jira_settings_menu(cfg)
+            elif choice == "confluence_depth":
+                changed = _edit_confluence_discovery_depth(cfg)
             elif choice == "confluence_publish":
                 changed = _edit_confluence_publish(cfg)
             elif choice == "doctor":

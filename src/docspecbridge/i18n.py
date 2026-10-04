@@ -272,6 +272,37 @@ def config_language(config: dict[str, Any] | None) -> str:
     return normalize_language(value)
 
 
+
+# 0.5.5: global Confluence discovery depth and Jira discovery diagnostics.
+for _lang, _values in {
+    "fr": {
+        "settings.confluence_discovery_depth": "Niveau d'arborescence à découvrir",
+        "jira.discovery.no_results_jql": "Aucun ticket trouvé. JQL : {jql}",
+        "jira.export_exists": "Le package Jira existe déjà : {package}. Supprimez-le avant de relancer l'extraction.",
+    },
+    "en": {
+        "settings.confluence_discovery_depth": "Hierarchy depth to discover",
+        "jira.discovery.no_results_jql": "No Jira issues found. JQL: {jql}",
+        "jira.export_exists": "The Jira package already exists: {package}. Remove it before extracting again.",
+    },
+    "de": {
+        "settings.confluence_discovery_depth": "Zu ermittelnde Hierarchietiefe",
+        "jira.discovery.no_results_jql": "Keine Jira-Vorgänge gefunden. JQL: {jql}",
+        "jira.export_exists": "Das Jira-Paket existiert bereits: {package}. Entfernen Sie es vor einer erneuten Extraktion.",
+    },
+    "es": {
+        "settings.confluence_discovery_depth": "Nivel de jerarquía a descubrir",
+        "jira.discovery.no_results_jql": "No se encontraron incidencias Jira. JQL: {jql}",
+        "jira.export_exists": "El paquete Jira ya existe: {package}. Elimínelo antes de volver a extraer.",
+    },
+    "zh": {
+        "settings.confluence_discovery_depth": "要发现的层级深度",
+        "jira.discovery.no_results_jql": "未找到 Jira 工单。JQL：{jql}",
+        "jira.export_exists": "Jira 包已存在：{package}。重新提取前请先删除它。",
+    },
+}.items():
+    _TRANSLATIONS[_lang].update(_values)
+
 def tr(config: dict[str, Any] | None, key: str, **kwargs: Any) -> str:
     lang = config_language(config)
     text = _TRANSLATIONS.get(lang, _TRANSLATIONS["en"]).get(key)
@@ -1162,3 +1193,113 @@ _TRANSLATIONS["zh"].update({
     "xlsx.empty_worksheet": "（空工作表）",
     "xlsx.cached_unavailable": "{formula} [缓存结果不可用]",
 })
+
+# 0.5.6: broader local formats and Git repository extraction.
+for _lang, _values in {
+    "fr": {
+        "extract.local": "Documents locaux (DOC/DOCX/PDF/PPT/PPTX/XLS/XLSX/CSV/TXT/ODF/HTML/Markdown)",
+        "extract.git": "Dépôt Git -> package",
+        "settings.git": "Dépôts Git",
+        "git.repository_url": "URL du dépôt GitHub / GitLab",
+        "git.no_markdown": "Aucun fichier Markdown trouvé dans le dépôt avec le mode de recherche actuel.",
+        "git.settings.recursive": "Rechercher les Markdown récursivement",
+        "git.settings.github_token": "Variable de token GitHub (optionnel, dépôts privés)",
+        "git.settings.gitlab_token": "Variable de token GitLab (optionnel, dépôts privés)",
+        "cli.git2md.help": "Télécharge un dépôt GitHub/GitLab et extrait ses fichiers Markdown sans dépendre de git.",
+        "cli.opt.git_url": "URL du dépôt GitHub/GitLab",
+        "cli.opt.git_ref": "Branche/tag/commit optionnel (sinon branche par défaut)",
+    },
+    "en": {
+        "extract.local": "Local documents (DOC/DOCX/PDF/PPT/PPTX/XLS/XLSX/CSV/TXT/ODF/HTML/Markdown)",
+        "extract.git": "Git repository -> package",
+        "settings.git": "Git repositories",
+        "git.repository_url": "GitHub / GitLab repository URL",
+        "git.no_markdown": "No Markdown file was found in the repository with the current discovery mode.",
+        "git.settings.recursive": "Discover Markdown recursively",
+        "git.settings.github_token": "GitHub token variable (optional, private repositories)",
+        "git.settings.gitlab_token": "GitLab token variable (optional, private repositories)",
+        "cli.git2md.help": "Download a GitHub/GitLab repository and extract its Markdown files without requiring git.",
+        "cli.opt.git_url": "GitHub/GitLab repository URL",
+        "cli.opt.git_ref": "Optional branch/tag/commit (default branch when omitted)",
+    },
+    "de": {
+        "extract.local": "Lokale Dokumente (DOC/DOCX/PDF/PPT/PPTX/XLS/XLSX/CSV/TXT/ODF/HTML/Markdown)",
+        "extract.git": "Git-Repository -> Paket",
+        "settings.git": "Git-Repositories",
+        "git.repository_url": "GitHub-/GitLab-Repository-URL",
+        "git.no_markdown": "Mit dem aktuellen Suchmodus wurde keine Markdown-Datei im Repository gefunden.",
+        "git.settings.recursive": "Markdown rekursiv suchen",
+        "git.settings.github_token": "GitHub-Token-Variable (optional, private Repositories)",
+        "git.settings.gitlab_token": "GitLab-Token-Variable (optional, private Repositories)",
+        "cli.git2md.help": "GitHub-/GitLab-Repository herunterladen und Markdown ohne lokale git-Abhängigkeit extrahieren.",
+        "cli.opt.git_url": "GitHub-/GitLab-Repository-URL",
+        "cli.opt.git_ref": "Optionale Branch/Tag/Commit-Referenz (sonst Standardbranch)",
+    },
+    "es": {
+        "extract.local": "Documentos locales (DOC/DOCX/PDF/PPT/PPTX/XLS/XLSX/CSV/TXT/ODF/HTML/Markdown)",
+        "extract.git": "Repositorio Git -> paquete",
+        "settings.git": "Repositorios Git",
+        "git.repository_url": "URL del repositorio GitHub / GitLab",
+        "git.no_markdown": "No se encontró ningún archivo Markdown en el repositorio con el modo de búsqueda actual.",
+        "git.settings.recursive": "Buscar Markdown de forma recursiva",
+        "git.settings.github_token": "Variable de token GitHub (opcional, repositorios privados)",
+        "git.settings.gitlab_token": "Variable de token GitLab (opcional, repositorios privados)",
+        "cli.git2md.help": "Descarga un repositorio GitHub/GitLab y extrae Markdown sin requerir git local.",
+        "cli.opt.git_url": "URL del repositorio GitHub/GitLab",
+        "cli.opt.git_ref": "Rama/tag/commit opcional (si se omite, rama predeterminada)",
+    },
+    "zh": {
+        "extract.local": "本地文档（DOC/DOCX/PDF/PPT/PPTX/XLS/XLSX/CSV/TXT/ODF/HTML/Markdown）",
+        "extract.git": "Git 仓库 -> 包",
+        "settings.git": "Git 仓库",
+        "git.repository_url": "GitHub / GitLab 仓库 URL",
+        "git.no_markdown": "按当前搜索模式未在仓库中找到 Markdown 文件。",
+        "git.settings.recursive": "递归发现 Markdown",
+        "git.settings.github_token": "GitHub token 环境变量（可选，私有仓库）",
+        "git.settings.gitlab_token": "GitLab token 环境变量（可选，私有仓库）",
+        "cli.git2md.help": "无需本地 git，下载 GitHub/GitLab 仓库并提取其中的 Markdown。",
+        "cli.opt.git_url": "GitHub/GitLab 仓库 URL",
+        "cli.opt.git_ref": "可选分支/tag/commit（省略时使用默认分支）",
+    },
+}.items():
+    _TRANSLATIONS[_lang].update(_values)
+
+for _lang, _values in {
+    "fr": {
+        "main.subtitle": "Pont de spécifications : documents/Git/Web/Confluence/Jira -> canonique -> Markdown/RAG/HTML/Confluence/Jira",
+        "cli.app.help": "Pont ETL documentaire : documents, Git, Web, Confluence/Jira et corpus RAG",
+        "cli.extract.help": "Extrait documents locaux, Git, Web, Confluence ou Jira vers packages Markdown/canoniques.",
+    },
+    "en": {
+        "main.subtitle": "Specification bridge: documents/Git/Web/Confluence/Jira -> canonical -> Markdown/RAG/HTML/Confluence/Jira",
+        "cli.app.help": "Document ETL bridge: documents, Git, Web, Confluence/Jira and RAG corpora",
+        "cli.extract.help": "Extract local documents, Git, Web, Confluence or Jira to Markdown/canonical packages.",
+    },
+    "de": {
+        "main.subtitle": "Spezifikationsbrücke: Dokumente/Git/Web/Confluence/Jira -> kanonisch -> Markdown/RAG/HTML/Confluence/Jira",
+        "cli.app.help": "Dokument-ETL-Brücke: Dokumente, Git, Web, Confluence/Jira und RAG-Korpora",
+        "cli.extract.help": "Lokale Dokumente, Git, Web, Confluence oder Jira in Markdown-/kanonische Pakete extrahieren.",
+    },
+    "es": {
+        "main.subtitle": "Puente de especificaciones: documentos/Git/Web/Confluence/Jira -> canónico -> Markdown/RAG/HTML/Confluence/Jira",
+        "cli.app.help": "Puente ETL documental: documentos, Git, Web, Confluence/Jira y corpus RAG",
+        "cli.extract.help": "Extrae documentos locales, Git, Web, Confluence o Jira a paquetes Markdown/canónicos.",
+    },
+    "zh": {
+        "main.subtitle": "规格桥接：文档/Git/Web/Confluence/Jira -> 规范模型 -> Markdown/RAG/HTML/Confluence/Jira",
+        "cli.app.help": "文档 ETL 桥接：文档、Git、Web、Confluence/Jira 和 RAG 语料",
+        "cli.extract.help": "将本地文档、Git、Web、Confluence 或 Jira 提取为 Markdown/规范包。",
+    },
+}.items():
+    _TRANSLATIONS[_lang].update(_values)
+
+# 0.5.7 local Web console launcher. The Web UI itself has a dedicated browser-language
+# catalog in web_console.py; these strings only cover CLI discoverability.
+for _lang, _values in {
+    "fr": {"main.web_console": "Console Web", "cli.web_console.help": "Ouvre la console Web locale DocSpecBridge dans le navigateur."},
+    "en": {"main.web_console": "Web console", "cli.web_console.help": "Open the local DocSpecBridge Web console in the browser."},
+    "de": {"main.web_console": "Web-Konsole", "cli.web_console.help": "Lokale DocSpecBridge-Web-Konsole im Browser öffnen."},
+    "es": {"main.web_console": "Consola Web", "cli.web_console.help": "Abrir la consola Web local de DocSpecBridge en el navegador."},
+    "zh": {"main.web_console": "Web 控制台", "cli.web_console.help": "在浏览器中打开本地 DocSpecBridge Web 控制台。"},
+}.items():
+    _TRANSLATIONS[_lang].update(_values)

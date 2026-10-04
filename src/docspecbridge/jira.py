@@ -12,7 +12,7 @@ import httpx
 
 from .adf import canonical_from_adf, canonical_to_adf
 from .html_io import canonical_from_markdown
-from .i18n import config_language
+from .i18n import config_language, tr
 from .package_io import read_manifest, resolve_package_output, write_canonical_package
 from .utils import safe_stem, write_json
 
@@ -151,15 +151,19 @@ def list_issues(
     clauses = [f'project = "{project_key}"']
     selected_type = str(issue_type or "").strip()
     if selected_type:
-        escaped_type = selected_type.replace('\\', '\\\\').replace('"', '\\"')
-        clauses.append(f'issuetype = "{escaped_type}"')
+        if selected_type.isdigit():
+            clauses.append(f"issuetype = {selected_type}")
+        else:
+            escaped_type = selected_type.replace('\\', '\\\\').replace('"', '\\"')
+            clauses.append(f'issuetype = "{escaped_type}"')
     search = str(query or "").strip()
     if search:
         escaped = search.replace('\\', '\\\\').replace('"', '\\"')
+        text_match = f'(summary ~ "{escaped}*" OR text ~ "{escaped}*")'
         if '-' in search and ' ' not in search:
-            clauses.append(f'(key = "{escaped}" OR summary ~ "\\"{escaped}*\\"" OR text ~ "\\"{escaped}*\\"")')
+            clauses.append(f'(key = "{escaped}" OR {text_match[1:-1]})')
         else:
-            clauses.append(f'(summary ~ "\\"{escaped}*\\"" OR text ~ "\\"{escaped}*\\"")')
+            clauses.append(text_match)
     jql = ' AND '.join(clauses) + ' ORDER BY updated DESC'
     params: list[tuple[str, Any]] = [
         ("jql", jql),
@@ -514,9 +518,11 @@ def _download_attachments(instance: dict[str, Any], issue: dict[str, Any], packa
 
 
 def export_issue(config: dict[str, Any], issue_key: str, destination: Path, *, instance_name: str | None = None) -> Path:
+    package = destination / f"{safe_stem(issue_key)}__jira"
+    if package.exists() and any(package.iterdir()):
+        raise FileExistsError(tr(config, "jira.export_exists", package=package))
     name, instance, issue = get_issue(config, issue_key, instance_name)
     export_cfg = ((config.get("jira") or {}).get("export") or {})
-    package = destination / f"{safe_stem(issue_key)}__jira"
     package.mkdir(parents=True, exist_ok=True)
     comment_warnings: list[str] = []
     if export_cfg.get("include_comments", True):

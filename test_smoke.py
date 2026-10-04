@@ -648,11 +648,11 @@ def test_cli_version_option():
 
     result = CliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == "DocSpecBridge 0.5.4"
+    assert result.stdout.strip() == "DocSpecBridge 0.5.7"
 
     short = CliRunner().invoke(app, ["-V"])
     assert short.exit_code == 0
-    assert short.stdout.strip() == "DocSpecBridge 0.5.4"
+    assert short.stdout.strip() == "DocSpecBridge 0.5.7"
 
 
 def test_v050_all_new_interactive_menu_labels_are_localized():
@@ -771,6 +771,7 @@ def test_v050_jira_discovery_labels_are_localized():
         "jira.discovery.manual", "jira.discovery.next", "jira.discovery.search_prompt",
         "jira.discovery.manual_prompt", "jira.discovery.mode_title",
         "jira.discovery.mode_manual", "jira.discovery.mode_browse", "jira.discovery.title_typed",
+        "jira.discovery.no_results_jql", "jira.export_exists", "settings.confluence_discovery_depth",
     ]
     for lang in SUPPORTED_LANGUAGES:
         cfg = load_config(None)
@@ -780,6 +781,10 @@ def test_v050_jira_discovery_labels_are_localized():
                 assert tr(cfg, key, project="ABC", count=2) != key
             elif key == "jira.discovery.title_typed":
                 assert tr(cfg, key, project="ABC", issue_type="Story", count=2) != key
+            elif key == "jira.discovery.no_results_jql":
+                assert tr(cfg, key, jql="project = ABC") != key
+            elif key == "jira.export_exists":
+                assert tr(cfg, key, package="output/ABC-1__jira") != key
             else:
                 assert tr(cfg, key) != key
 
@@ -887,17 +892,56 @@ def test_v050_jira_extract_browse_selects_type_before_issue_list(monkeypatch, tm
     monkeypatch.setattr(cli, "select_option", lambda *a, **k: "browse")
     order = []
     monkeypatch.setattr(cli, "_select_jira_project", lambda *a, **k: order.append("project") or {"key": "ABC"})
-    monkeypatch.setattr(cli, "_select_jira_issue_type", lambda *a, **k: order.append("type") or "Story")
-    monkeypatch.setattr(cli, "_select_jira_issue", lambda cfg, instance, project, issue_type: order.append(("issues", project, issue_type)) or "ABC-2")
+    monkeypatch.setattr(cli, "_select_jira_issue_type", lambda *a, **k: order.append("type") or ("10001", "Story"))
+    monkeypatch.setattr(cli, "_select_jira_issue", lambda cfg, instance, project, issue_type, issue_type_label=None: order.append(("issues", project, issue_type, issue_type_label)) or "ABC-2")
     monkeypatch.setattr(cli, "export_issue", lambda cfg, issue, destination, instance_name=None: destination / "pkg")
     cli._interactive_extract_jira(cfg)
-    assert order == ["project", "type", ("issues", "ABC", "Story")]
+    assert order == ["project", "type", ("issues", "ABC", "10001", "Story")]
 
 
-def test_v050_jira_list_issues_accepts_issue_type_filter_in_source():
+def test_v055_jira_list_issues_uses_numeric_issue_type_id(monkeypatch):
+    import docspecbridge.jira as jira
+    cfg = load_config(None)
+    captured = {}
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"issues": [], "isLast": True}
+    class Client:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def get(self, url, params=None):
+            captured["params"] = params
+            return Response()
+    monkeypatch.setattr(jira, "get_jira_instance", lambda config, name=None: ("prod", {"domain": "example.atlassian.net"}))
+    monkeypatch.setattr(jira, "_client", lambda instance: Client())
+    page = jira.list_issues(cfg, "STM", "prod", issue_type="10042", query="ZRBF")
+    assert 'project = "STM"' in page["jql"]
+    assert 'issuetype = 10042' in page["jql"]
+    assert 'summary ~ "ZRBF*"' in page["jql"]
+    assert 'text ~ "ZRBF*"' in page["jql"]
+
+
+def test_v055_jira_export_refuses_existing_package_before_api_call(monkeypatch, tmp_path):
+    import docspecbridge.jira as jira
+    cfg = load_config(None)
+    package = tmp_path / "STM-13__jira"
+    package.mkdir()
+    (package / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(jira, "get_issue", lambda *a, **k: (_ for _ in ()).throw(AssertionError("API must not be called")))
+    try:
+        jira.export_issue(cfg, "STM-13", tmp_path, instance_name="prod")
+        assert False, "expected FileExistsError"
+    except FileExistsError:
+        pass
+
+
+def test_v055_confluence_discovery_depth_is_not_in_publish_editor_source():
     from pathlib import Path
-    source = (Path(__file__).parent / "src" / "docspecbridge" / "jira.py").read_text(encoding="utf-8")
-    assert 'issuetype = "{escaped_type}"' in source
+    source = (Path(__file__).parent / "src" / "docspecbridge" / "config_ui.py").read_text(encoding="utf-8")
+    publish_start = source.index("def _edit_confluence_publish")
+    publish_end = source.index("def _show_doctor", publish_start)
+    assert 'selector["max_depth"]' not in source[publish_start:publish_end]
+    assert "def _edit_confluence_discovery_depth" in source
 
 
 def test_v051_legacy_extensions_are_removed_from_config(tmp_path):
@@ -989,7 +1033,7 @@ def test_v052_config_schema_is_persisted_and_old_yaml_is_backed_up(tmp_path):
     cfg = load_config(path)
     saved = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert saved["docspecbridge"]["config_schema_version"] == CURRENT_CONFIG_SCHEMA_VERSION
-    assert saved["docspecbridge"]["last_updated_by"] == "0.5.4"
+    assert saved["docspecbridge"]["last_updated_by"] == "0.5.7"
     assert "extensions" not in saved["app"]
     assert saved["confluence"]["instances"]["default"]["domain"] == "example.atlassian.net"
     info = cfg["_runtime"]["config_migration"]
@@ -998,7 +1042,7 @@ def test_v052_config_schema_is_persisted_and_old_yaml_is_backed_up(tmp_path):
 
     # Loading an already-current file must not create another backup.
     load_config(path)
-    assert not (tmp_path / "docspecbridge.yaml.pre-0.5.4.2.bak").exists()
+    assert not (tmp_path / "docspecbridge.yaml.pre-0.5.5.2.bak").exists()
 
 
 def test_v052_newer_config_schema_is_rejected_without_rewrite(tmp_path):
@@ -1127,8 +1171,8 @@ def test_v052_readme_is_release_neutral_and_links_changelog():
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "CHANGELOG.md" in readme
     assert "What changes in 0.5" not in readme
-    assert "## 0.5.4" in changelog
-    assert changelog.index("## 0.5.4") < changelog.index("## 0.5.3") < changelog.index("## 0.5.1") < changelog.index("## 0.5.0")
+    assert "## 0.5.5" in changelog
+    assert changelog.index("## 0.5.5") < changelog.index("## 0.5.4") < changelog.index("## 0.5.3") < changelog.index("## 0.5.1") < changelog.index("## 0.5.0")
 
 
 def test_v052_force_extract_rolls_back_on_failed_rebuild(tmp_path, monkeypatch):
@@ -1316,10 +1360,13 @@ def test_v054_mermaid_survives_all_package_renderers(tmp_path):
 
     assert "```mermaid\nsequenceDiagram" in human
     assert "```mermaid\nsequenceDiagram" in rag
-    assert '<pre class="mermaid">sequenceDiagram' in html
-    assert "```mermaid\nsequenceDiagram" in confluence
-    assert "<pre><code>sequenceDiagram" not in confluence
-    assert any(block.get("type") == "diagram" for block in canonical["blocks"])
+    assert 'src="images/mermaid_001.png"' in html
+    assert 'src="images/mermaid_001.png"' in confluence
+    assert (tmp_path / "images" / "mermaid_001.png").exists()
+    diagrams = [block for block in canonical["blocks"] if block.get("type") == "diagram"]
+    assert len(diagrams) == 1
+    assert diagrams[0].get("mermaid", "").startswith("sequenceDiagram")
+    assert diagrams[0].get("fallback_asset") == "images/mermaid_001.png"
 
 
 def test_v054_mermaid_language_with_trailing_info_is_detected():
@@ -1332,3 +1379,170 @@ def test_v054_mermaid_language_with_trailing_info_is_detected():
     )
     assert doc["blocks"][0]["type"] == "diagram"
     assert doc["blocks"][0]["mermaid"].startswith("graph TD")
+
+
+def test_v055_jira_issue_type_selector_returns_id_and_display_name(monkeypatch):
+    import docspecbridge.cli as cli
+    cfg = load_config(None)
+    cfg["jira"]["defaults"] = {"prod": {"project": "STM", "issue_type": "Epopée"}}
+    monkeypatch.setattr(cli, "list_issue_types", lambda *a, **k: [
+        {"id": "10001", "name": "Story"},
+        {"id": "10042", "name": "Epopée"},
+    ])
+    seen = {}
+    def fake_select(title, options, default_index=0, **kwargs):
+        rows = list(options)
+        seen["rows"] = rows
+        seen["default_index"] = default_index
+        return rows[default_index][0]
+    monkeypatch.setattr(cli, "select_option", fake_select)
+    selected = cli._select_jira_issue_type(cfg, "prod", "STM")
+    assert selected == ("10042", "Epopée")
+    assert seen["default_index"] == 1
+    assert seen["rows"][1] == ("10042", "Epopée")
+
+
+# 0.5.6 -----------------------------------------------------------------------
+
+def test_v056_standard_document_extensions_and_git_defaults():
+    from docspecbridge.config import SUPPORTED_SOURCE_EXTENSIONS, load_config
+    expected = {".doc", ".docx", ".docm", ".ppt", ".pptx", ".pptm", ".xls", ".xlsx", ".xlsm", ".odt", ".ods", ".odp", ".rtf", ".txt", ".csv", ".md"}
+    assert expected.issubset(set(SUPPORTED_SOURCE_EXTENSIONS))
+    cfg = load_config(None)
+    assert cfg["git"]["recursive"] is True
+    assert cfg["git"]["github_token_env"] == "GITHUB_TOKEN"
+    assert cfg["git"]["gitlab_token_env"] == "GITLAB_TOKEN"
+
+
+def test_v056_csv_native_adapter(tmp_path):
+    from docspecbridge.csv_io import canonical_from_csv
+    path = tmp_path / "data.csv"
+    path.write_text("Nom;Valeur\nAlpha;1\nBeta;2\n", encoding="utf-8")
+    doc, meta = canonical_from_csv(path)
+    assert meta["delimiter"] == ";"
+    assert meta["rows"] == 3
+    assert doc["blocks"][0]["type"] == "table"
+    assert doc["blocks"][0]["rows"][0]["cells"][0]["header"] is True
+
+
+def test_v056_plain_text_native_adapter(tmp_path):
+    from docspecbridge.text_io import canonical_from_plain_text
+    path = tmp_path / "note.txt"
+    path.write_text("Line one\nLine two\n\nSecond paragraph\n", encoding="utf-8")
+    doc, meta = canonical_from_plain_text(path)
+    assert meta["lines"] == 4
+    assert len(doc["blocks"]) == 2
+    assert any(item.get("type") == "hard_break" for item in doc["blocks"][0]["inlines"])
+
+
+def test_v056_markdown_local_image_is_packaged(tmp_path):
+    from docspecbridge.extractor import _prepare_markdown_assets
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    image = source_dir / "diagram.png"
+    image.write_bytes(b"PNGDATA")
+    source = source_dir / "README.md"
+    source.write_text("![Diagram](diagram.png)\n", encoding="utf-8")
+    package = tmp_path / "out"
+    rewritten, assets, warnings = _prepare_markdown_assets(source.read_text(), source, package)
+    assert warnings == []
+    assert "images/diagram.png" in rewritten
+    assert (package / "images" / "diagram.png").read_bytes() == b"PNGDATA"
+    assert assets[0]["file"] == "images/diagram.png"
+
+
+def test_v056_git_provider_parsing():
+    from docspecbridge.git_io import _provider
+    assert _provider("https://github.com/acme/docs") == ("github", "github.com", "acme/docs")
+    assert _provider("https://gitlab.com/acme/team/docs.git") == ("gitlab", "gitlab.com", "acme/team/docs")
+    assert _provider("https://gitlab.internal.example/acme/docs") == ("gitlab", "gitlab.internal.example", "acme/docs")
+
+
+def test_v056_mermaid_fallback_is_materialized_without_changing_source(monkeypatch, tmp_path):
+    import sys
+    import types
+    from docspecbridge.mermaid_io import materialize_mermaid_fallbacks
+    from docspecbridge.renderers import render_markdown, render_html, render_confluence
+
+    class Diagram:
+        def png(self, **kwargs):
+            return b"PNG"
+
+    monkeypatch.setitem(sys.modules, "mermaidx", types.SimpleNamespace(render=lambda source: Diagram()))
+    doc = {"title": "Demo", "blocks": [{"type": "diagram", "diagram_type": "mermaid", "mermaid": "flowchart TD\nA-->B"}], "assets": []}
+    warnings = materialize_mermaid_fallbacks(doc, tmp_path)
+    assert warnings == []
+    assert (tmp_path / "images" / "mermaid_001.png").read_bytes() == b"PNG"
+    assert "```mermaid" in render_markdown(doc)
+    assert "images/mermaid_001.png" in render_html(doc)
+    assert "images/mermaid_001.png" in render_confluence(doc)
+
+
+def test_v056_i18n_key_sets_match():
+    from docspecbridge.i18n import _TRANSLATIONS
+    reference = set(_TRANSLATIONS["en"])
+    for lang, values in _TRANSLATIONS.items():
+        assert set(values) == reference, (lang, sorted(reference - set(values)), sorted(set(values) - reference))
+
+
+def test_v057_web_language_defaults_to_browser():
+    from docspecbridge.config import load_config
+    from docspecbridge.web_console import web_language
+
+    cfg = load_config(None)
+    cfg.setdefault("web", {})["language"] = "auto"
+    assert web_language(cfg, "fr-FR") == "fr"
+    assert web_language(cfg, "de-DE") == "de"
+    cfg["web"]["language"] = "es"
+    assert web_language(cfg, "fr-FR") == "es"
+
+
+def test_v057_web_bootstrap_and_quick_settings(tmp_path):
+    from docspecbridge.config import init_config, load_config
+    from docspecbridge.web_console import WebApplication
+
+    path = tmp_path / "docspecbridge.yaml"
+    init_config(path)
+    web = WebApplication(path)
+    boot = web.bootstrap("zh-CN")
+    assert boot["language"] == "zh"
+    assert boot["settings"]["web_language"] == "auto"
+    assert ".doc" in boot["supported_extensions"]
+    assert ".csv" in boot["supported_extensions"]
+
+    web.save_quick({
+        "web_language": "fr",
+        "source": str(tmp_path / "in"),
+        "destination": str(tmp_path / "out"),
+        "recursive": False,
+        "git_recursive": False,
+        "confluence_depth": 2,
+        "rag_destination": str(tmp_path / "rag"),
+    })
+    cfg = load_config(path)
+    assert cfg["web"]["language"] == "fr"
+    assert cfg["app"]["recursive"] is False
+    assert cfg["git"]["recursive"] is False
+    assert cfg["confluence"]["page_selector"]["max_depth"] == 2
+
+
+def test_v057_web_html_has_home_first_and_structured_result_widgets():
+    from docspecbridge.web_console import HTML_TEMPLATE
+
+    assert 'data-tab="home"' in HTML_TEMPLATE
+    assert HTML_TEMPLATE.index('data-tab="home"') < HTML_TEMPLATE.index('data-tab="settings"')
+    assert 'id="extractResult"' in HTML_TEMPLATE
+    assert 'id="importResult"' in HTML_TEMPLATE
+    assert 'id="ragResult"' in HTML_TEMPLATE
+    assert "startJob('extract.local'" in HTML_TEMPLATE
+    from docspecbridge.web_console import WEB_TEXT
+    assert "subprocess" in WEB_TEXT["en"]["help.text"]
+
+
+def test_v057_default_web_config_is_local_browser_friendly():
+    from docspecbridge.config import load_config
+
+    cfg = load_config(None)
+    assert cfg["web"]["language"] == "auto"
+    assert cfg["web"]["port"] == 8765
+    assert cfg["web"]["open_browser"] is True

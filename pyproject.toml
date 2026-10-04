@@ -1,6 +1,6 @@
 [project]
 name = "docspecbridge"
-version = "0.5.4"
+version = "0.5.7"
 description = "Canonical specification bridge: Office/PDF/HTML/Markdown/Confluence/Jira -> Markdown, HTML, RAG, Confluence and Jira"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,7 @@ dependencies = [
   "python-pptx>=1.0.2,<2",
   "PyMuPDF>=1.26,<2",
   "openpyxl>=3.1,<4",
+  "mermaidx>=0.9.5,<1",
 ]
 
 [project.urls]

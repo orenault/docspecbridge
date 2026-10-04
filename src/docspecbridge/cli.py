@@ -35,6 +35,7 @@ from .jira import export_issue, create_issue_from_markdown, list_projects, list_
 from .html_io import canonical_from_html_source, canonical_from_markdown
 from .package_io import write_canonical_package
 from .renderers import render_html
+from .git_io import run_extract_git_repository
 
 try:
     _HELP_CONFIG = load_config(None, auto_migrate=False)
@@ -221,6 +222,31 @@ def extract(
     console.print(table)
     if not outcomes:
         console.print(f"[yellow]{tr(cfg, 'extract.none')}[/yellow]")
+    if any(item.error for item in outcomes):
+        raise typer.Exit(2)
+
+
+@app.command("git2md", help=_h("cli.git2md.help"))
+def git2md_cmd(
+    url: Annotated[str, typer.Option("--url", help=_h("cli.opt.git_url"))],
+    dest: Annotated[Optional[Path], typer.Option("--dest", "-d", help=_h("cli.opt.dest"))] = None,
+    recursive: Annotated[Optional[bool], typer.Option("--recursive/--no-recursive")] = None,
+    ref: Annotated[Optional[str], typer.Option("--ref", help=_h("cli.opt.git_ref"))] = None,
+    config: Annotated[Optional[Path], typer.Option("--config", "-c", help=_h("cli.opt.config"))] = None,
+) -> None:
+    cfg = _cfg(config)
+    dest = dest or Path(cfg["app"]["destination"])
+    outcomes, context = run_extract_git_repository(cfg, url, dest, recursive=recursive, ref=ref)
+    console.print(f"[dim]{context.get('provider')} {context.get('project')} @ {context.get('ref')}[/dim]")
+    for item in outcomes:
+        if item.error:
+            console.print(f"[red]{tr(cfg, 'state.error')}[/red] {item.source}: {item.error}")
+        else:
+            console.print(f"[green]{tr(cfg, 'state.ok')}[/green] {item.source.name} -> {item.package_dir}")
+            for warning in item.warnings:
+                console.print(f"[yellow]  ! {warning}[/yellow]")
+    if not outcomes:
+        console.print(f"[yellow]{tr(cfg, 'git.no_markdown')}[/yellow]")
     if any(item.error for item in outcomes):
         raise typer.Exit(2)
 
@@ -724,6 +750,19 @@ def config_keys_cmd(
     console.print(table)
 
 
+
+
+@app.command("web", help=_h("cli.web_console.help"))
+def web_console_cmd(
+    port: Annotated[Optional[int], typer.Option("--port", min=1, max=65535, help="Local HTTP port")] = None,
+    no_open: Annotated[bool, typer.Option("--no-open", help="Do not open the browser automatically")] = False,
+    config: Annotated[Optional[Path], typer.Option("--config", "-c", help=_h("cli.opt.config"))] = None,
+) -> None:
+    """Open the local browser-based DocSpecBridge console."""
+    from .web_console import run_web_console
+    run_web_console(config, port=port, open_browser=False if no_open else None)
+
+
 @app.command(help=_h("cli.doctor.help"))
 def doctor(
     config: Annotated[Optional[Path], typer.Option("--config", "-c")] = None,
@@ -851,7 +890,7 @@ def _select_jira_project(cfg: dict, instance_name: str, *, ask_filter: bool = Fa
     return next(row for row in projects if str(row.get("key") or row.get("id") or "") == str(project_key))
 
 
-def _select_jira_issue_type(cfg: dict, instance_name: str, project_key: str) -> str:
+def _select_jira_issue_type(cfg: dict, instance_name: str, project_key: str) -> tuple[str, str]:
     types = list_issue_types(cfg, project_key, instance_name)
     if not types:
         raise RuntimeError(tr(cfg, "jira.no_issue_type", project=project_key))
@@ -860,17 +899,20 @@ def _select_jira_issue_type(cfg: dict, instance_name: str, project_key: str) -> 
     if default_type:
         console.print(f"[dim]{tr(cfg, 'jira.current_default', value=default_type)}[/dim]")
     default_idx = next(
-        (idx for idx, row in enumerate(types) if str(row.get("name") or row.get("id") or "") == default_type),
+        (idx for idx, row in enumerate(types) if default_type in {str(row.get("name") or ""), str(row.get("id") or "")}),
         0,
     )
-    issue_type = select_option(
+    selected_id = select_option(
         tr(cfg, "interactive.issue_type_select"),
-        [(str(row.get("name") or row.get("id") or ""), str(row.get("name") or row.get("id") or "")) for row in types],
+        [(str(row.get("id") or row.get("name") or ""), str(row.get("name") or row.get("id") or "")) for row in types],
         default_index=default_idx,
     )
-    if issue_type is None:
+    if selected_id is None:
         raise UserCancelled()
-    return str(issue_type)
+    row = next((row for row in types if str(row.get("id") or row.get("name") or "") == str(selected_id)), None)
+    if not row:
+        raise RuntimeError(tr(cfg, "jira.no_issue_type", project=project_key))
+    return str(row.get("id") or selected_id), str(row.get("name") or row.get("id") or selected_id)
 
 
 
@@ -885,7 +927,9 @@ def _jira_issue_label(issue: dict) -> str:
     return f"{key} — {summary}" + (f" [{details}]" if details else "")
 
 
-def _select_jira_issue(cfg: dict, instance_name: str, project_key: str, issue_type: str) -> str:
+def _select_jira_issue(
+    cfg: dict, instance_name: str, project_key: str, issue_type: str, issue_type_label: str | None = None
+) -> str:
     discovery = (cfg.get("jira") or {}).get("discovery") or {}
     page_size = max(1, min(int(discovery.get("page_size", 50)), 100))
     query: str | None = None
@@ -906,7 +950,12 @@ def _select_jira_issue(cfg: dict, instance_name: str, project_key: str, issue_ty
         if page.get("next_page_token"):
             options.append((("next", str(page.get("next_page_token"))), tr(cfg, "jira.discovery.next")))
         options.append((("back", None), tr(cfg, "common.back")))
-        title = tr(cfg, "jira.discovery.title_typed", project=project_key, issue_type=issue_type, count=len(issues))
+        if not issues:
+            console.print(f"[yellow]{tr(cfg, 'jira.discovery.no_results_jql', jql=page.get('jql', ''))}[/yellow]")
+        title = tr(
+            cfg, "jira.discovery.title_typed", project=project_key,
+            issue_type=issue_type_label or issue_type, count=len(issues),
+        )
         choice = select_option(title, options)
         if choice is None or choice[0] == "back":
             raise UserCancelled()
@@ -1247,11 +1296,29 @@ def _interactive_extract_jira(cfg: dict) -> None:
     else:
         project = _select_jira_project(cfg, selected)
         project_key = str(project.get("key") or project.get("id") or "")
-        issue_type = _select_jira_issue_type(cfg, selected, project_key)
-        issue = _select_jira_issue(cfg, selected, project_key, issue_type)
+        issue_type_id, issue_type_label = _select_jira_issue_type(cfg, selected, project_key)
+        issue = _select_jira_issue(cfg, selected, project_key, issue_type_id, issue_type_label)
 
     package = export_issue(cfg, issue, Path(cfg["app"]["destination"]), instance_name=selected)
     console.print(f"[green]{tr(cfg, 'jira.export_done', package=package)}[/green]")
+
+
+def _interactive_extract_git(cfg: dict) -> None:
+    url = prompt_text(tr(cfg, "git.repository_url"), "").strip()
+    if not url:
+        raise UserCancelled()
+    dest = Path(prompt_text(tr(cfg, "interactive.destination"), str(cfg["app"]["destination"]))).expanduser()
+    outcomes, context = run_extract_git_repository(cfg, url, dest)
+    console.print(f"[dim]{context.get('provider')} {context.get('project')} @ {context.get('ref')}[/dim]")
+    for item in outcomes:
+        if item.error:
+            console.print(f"[red]{tr(cfg, 'state.error')}[/red] {item.source}: {item.error}")
+        else:
+            console.print(f"[green]{tr(cfg, 'state.ok')}[/green] {item.source.name} -> {item.package_dir}")
+            for warning in item.warnings:
+                console.print(f"[yellow]  ! {warning}[/yellow]")
+    if not outcomes:
+        console.print(f"[yellow]{tr(cfg, 'git.no_markdown')}[/yellow]")
 
 
 def _extract_menu(cfg: dict) -> None:
@@ -1264,6 +1331,7 @@ def _extract_menu(cfg: dict) -> None:
                 ("confluence", tr(cfg, "extract.confluence")),
                 ("jira", tr(cfg, "extract.jira")),
                 ("web", tr(cfg, "extract.web")),
+                ("git", tr(cfg, "extract.git")),
                 ("back", tr(cfg, "common.back")),
             ],
         )
@@ -1280,6 +1348,8 @@ def _extract_menu(cfg: dict) -> None:
                 _interactive_extract_jira(cfg)
             elif choice == "web":
                 _interactive_web(cfg)
+            elif choice == "git":
+                _interactive_extract_git(cfg)
         except UserCancelled:
             _cancelled(cfg)
         except Exception as exc:
@@ -1291,7 +1361,7 @@ def _interactive_import_jira(cfg: dict) -> None:
     source = Path(prompt_text(tr(cfg, "interactive.package_jira"), str(cfg["app"]["destination"]))).expanduser()
     project = _select_jira_project(cfg, selected, ask_filter=True)
     project_key = str(project.get("key") or project.get("id") or "")
-    issue_type = _select_jira_issue_type(cfg, selected, project_key)
+    _, issue_type = _select_jira_issue_type(cfg, selected, project_key)
     summary = prompt_text(tr(cfg, "interactive.summary_default"), "").strip() or None
     parent = prompt_text(tr(cfg, "interactive.parent_optional"), "").strip() or None
     result = create_issue_from_markdown(
@@ -1350,7 +1420,7 @@ def _help(cfg: dict) -> None:
     text_by_lang = {
         "en": """[bold]DocSpecBridge can:[/bold]
 
-• Extract DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence and Jira into portable canonical packages.
+• Extract DOC/DOCX, PDF, PPT/PPTX, XLS/XLSX, CSV, TXT, ODF, HTML, Markdown, Git, Web, Confluence and Jira into portable canonical packages.
 • Import packages into Confluence or Jira with images, attachments and persistent publication state.
 • Browse Confluence by instance → space → page and Jira by instance → project → issue type → issue.
 • Force re-extract local packages while preserving Confluence/Jira publication identity.
@@ -1361,7 +1431,7 @@ def _help(cfg: dict) -> None:
 In lists: ↑/↓ navigate, Enter selects, Esc cancels the current action and returns.""",
         "fr": """[bold]DocSpecBridge permet de :[/bold]
 
-• Extraire DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence et Jira vers des packages canoniques portables.
+• Extraire DOC/DOCX, PDF, PPT/PPTX, XLS/XLSX, CSV, TXT, ODF, HTML, Markdown, Git, Web, Confluence et Jira vers des packages canoniques portables.
 • Importer les packages vers Confluence ou Jira avec images, pièces jointes et état de publication persistant.
 • Parcourir Confluence par instance → espace → page et Jira par instance → projet → type de ticket → ticket.
 • Forcer la ré-extraction des packages locaux tout en préservant l'identité de publication Confluence/Jira.
@@ -1372,7 +1442,7 @@ In lists: ↑/↓ navigate, Enter selects, Esc cancels the current action and re
 Dans les listes : ↑/↓ pour naviguer, Entrée pour choisir, Esc pour annuler l'action courante et revenir.""",
         "de": """[bold]DocSpecBridge kann:[/bold]
 
-• DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence und Jira in portable kanonische Pakete extrahieren.
+• DOC/DOCX, PDF, PPT/PPTX, XLS/XLSX, CSV, TXT, ODF, HTML, Markdown, Git, Web, Confluence und Jira in portable kanonische Pakete extrahieren.
 • Pakete mit Bildern, Anhängen und dauerhaftem Veröffentlichungsstatus nach Confluence oder Jira importieren.
 • Confluence über Instanz → Bereich → Seite und Jira über Instanz → Projekt → Vorgangstyp → Vorgang durchsuchen.
 • Lokale Pakete zwangsweise neu extrahieren und dabei die Confluence-/Jira-Veröffentlichungsidentität beibehalten.
@@ -1383,7 +1453,7 @@ Dans les listes : ↑/↓ pour naviguer, Entrée pour choisir, Esc pour annuler 
 In Listen: ↑/↓ navigieren, Enter auswählen, Esc bricht die aktuelle Aktion ab und kehrt zurück.""",
         "es": """[bold]DocSpecBridge permite:[/bold]
 
-• Extraer DOCX, PDF, PPTX, XLSX, HTML, Markdown, Web, Confluence y Jira a paquetes canónicos portátiles.
+• Extraer DOC/DOCX, PDF, PPT/PPTX, XLS/XLSX, CSV, TXT, ODF, HTML, Markdown, Git, Web, Confluence y Jira a paquetes canónicos portátiles.
 • Importar paquetes a Confluence o Jira con imágenes, adjuntos y estado de publicación persistente.
 • Explorar Confluence por instancia → espacio → página y Jira por instancia → proyecto → tipo de incidencia → incidencia.
 • Forzar la reextracción de paquetes locales conservando la identidad de publicación de Confluence/Jira.
@@ -1394,7 +1464,7 @@ In Listen: ↑/↓ navigieren, Enter auswählen, Esc bricht die aktuelle Aktion 
 En las listas: ↑/↓ navegan, Enter selecciona y Esc cancela la acción actual y vuelve.""",
         "zh": """[bold]DocSpecBridge 可以：[/bold]
 
-• 将 DOCX、PDF、PPTX、XLSX、HTML、Markdown、Web、Confluence 和 Jira 提取为可移植的规范包。
+• 将 DOC/DOCX、PDF、PPT/PPTX、XLS/XLSX、CSV、TXT、ODF、HTML、Markdown、Git、Web、Confluence 和 Jira 提取为可移植的规范包。
 • 将包导入 Confluence 或 Jira，并保留图片、附件和持久发布状态。
 • 按 实例 → 空间 → 页面 浏览 Confluence，按 实例 → 项目 → 事项类型 → 事项 浏览 Jira。
 • 强制重新提取本地包，同时保留 Confluence/Jira 发布身份。
@@ -1426,6 +1496,7 @@ def menu() -> None:
                 ("extract", tr(cfg, "main.extract_v050")),
                 ("import", tr(cfg, "main.import_v050")),
                 ("rag", tr(cfg, "main.rag_v050")),
+                ("web_console", tr(cfg, "main.web_console")),
                 ("help", tr(cfg, "main.help")),
                 ("quit", tr(cfg, "main.quit")),
             ],
@@ -1441,6 +1512,9 @@ def menu() -> None:
                 _import_menu(cfg)
             elif choice == "rag":
                 _rag_menu(cfg)
+            elif choice == "web_console":
+                from .web_console import run_web_console
+                run_web_console(config_path)
             elif choice == "help":
                 _help(cfg)
         except UserCancelled:

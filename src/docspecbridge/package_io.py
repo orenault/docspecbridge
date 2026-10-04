@@ -11,6 +11,7 @@ from .geometry import build_publication_variants
 from .rag import chunk_markdown, write_chunks_jsonl
 from .renderers import render_confluence, render_html, render_markdown, render_rag
 from .utils import safe_stem, write_json
+from .mermaid_io import materialize_mermaid_fallbacks
 
 
 def read_manifest(package_dir: Path) -> dict[str, Any]:
@@ -61,6 +62,10 @@ def write_canonical_package(
     rag_profile = rag_profile or {}
     publication_profile = publication_profile or {}
     warnings = list(warnings or [])
+    # Generate portable Mermaid PNG fallbacks once, inside the package. Human/RAG
+    # Markdown still keeps the original Mermaid source; targets without Mermaid
+    # support (HTML/Confluence) can use these images with no external installation.
+    warnings.extend(materialize_mermaid_fallbacks(doc, package_dir))
 
     # 0.5.0: human-facing artefacts carry the source stem. Generic state/index files
     # (manifest/chunks/rag descriptor/publication state) intentionally remain stable.

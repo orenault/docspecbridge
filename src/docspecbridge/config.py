@@ -16,7 +16,11 @@ CURRENT_CONFIG_SCHEMA_VERSION = 2
 
 # Source formats supported by the application. This is product capability, not user configuration.
 SUPPORTED_SOURCE_EXTENSIONS: tuple[str, ...] = (
-    ".docx", ".pdf", ".pptx", ".xlsx", ".html", ".htm", ".md", ".markdown",
+    ".doc", ".docx", ".docm", ".pdf",
+    ".ppt", ".pptx", ".pptm", ".odp",
+    ".xls", ".xlsx", ".xlsm", ".ods",
+    ".odt", ".rtf", ".txt", ".csv",
+    ".html", ".htm", ".md", ".markdown",
 )
 
 
@@ -33,6 +37,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "preserve_source_tree": True,
         "copy_source": True,
         "overwrite": False,
+    },
+    "web": {
+        # The Web console is local-only (127.0.0.1). Its language defaults to the browser
+        # and can be overridden independently from the CLI language.
+        "language": "auto",
+        "port": 8765,
+        "open_browser": True,
     },
     "extract": {
         "engine": "xberg",
@@ -136,6 +147,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "timeout_seconds": 30,
             "user_agent": f"DocSpecBridge/{__version__}",
         },
+    },
+    "git": {
+        # Public repositories work without authentication. Tokens are optional and
+        # read only from environment variables when a private repository requires one.
+        "recursive": True,
+        "github_token_env": "GITHUB_TOKEN",
+        "gitlab_token_env": "GITLAB_TOKEN",
+        "timeout_seconds": 60,
+        "verify_ssl": True,
     },
     "jira": {
         # If empty, Jira commands reuse matching Confluence instance settings.

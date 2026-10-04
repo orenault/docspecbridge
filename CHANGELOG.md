@@ -2,6 +2,52 @@
 
 All notable DocSpecBridge changes are documented here, with the most recent release first.
 
+## 0.5.7
+
+### Added
+- Local Web console launched with `docspecbridge web`, implemented with Python's built-in `ThreadingHTTPServer` and no new Web-framework dependency.
+- Browser UI tabs for Home, Settings, Extract, Import, RAG and Help/Doctor.
+- Structured background jobs for extraction, publication and RAG operations; the browser renders status cards, progress and result tables instead of subprocess/terminal output.
+- Web discovery selectors for Confluence spaces/pages and Jira projects/issue types/issues.
+- Browser-language auto-detection for the Web console with a persistent `web.language` override.
+- Quick Web settings plus a complete YAML editor for advanced configuration.
+- Local-only session token protection for the JSON API and a built-in Stop server action.
+
+### Changed
+- The interactive CLI now exposes a `Web console` launcher while keeping all existing CLI workflows.
+- Web operations call DocSpecBridge Python services directly rather than shelling out to the CLI.
+
+### Fixed
+- Jira interactive import now passes the selected issue type name (rather than the `(id, name)` selector tuple) to issue creation.
+
+## 0.5.6
+
+### Added
+- Local source support for legacy/common document formats: DOC, DOCM, PPT, PPTM, XLS, XLSM, ODT, ODS, ODP, RTF, TXT and CSV.
+- Native CSV extraction with delimiter/encoding detection and canonical table output.
+- Native plain-text extraction for TXT.
+- Git repository extraction for GitHub, GitLab.com and self-managed GitLab without requiring a local `git` installation. Public repositories work anonymously; optional environment-variable tokens cover private repositories.
+- Global Git Markdown recursive/non-recursive discovery setting.
+- Packaging of relative local images referenced by Markdown, including Markdown downloaded from Git repositories.
+- Built-in Mermaid-to-PNG fallback rendering through the Python `mermaidx` dependency, with no Node.js/npm/Chromium installation.
+- PyPI release workflow support for replacing README Mermaid fences with generated PNG release assets before package publication.
+
+### Changed
+- The README architecture diagram is vertical again for improved readability.
+- HTML and Confluence renderers prefer generated Mermaid PNG fallbacks while human Markdown and RAG keep the Mermaid source.
+- `doctor` reports the installed Mermaid renderer version.
+
+## 0.5.5
+
+### Changed
+- Moved the global Confluence page-tree discovery depth out of publishing options into its own settings entry. The underlying YAML key remains global and unchanged.
+- Jira project/type discovery now uses the selected issue type ID in JQL while keeping the issue type name in the UI.
+- Jira text filtering uses simpler JQL text matching and zero-result discovery displays the generated JQL for diagnosis.
+
+### Fixed
+- Jira browse discovery no longer depends on quoting the displayed issue type name, improving reliability for localized or accented issue types.
+- Jira extraction now refuses to overwrite an existing output package, matching the non-destructive default used by local document extraction.
+
 ## 0.5.4
 
 ### Added

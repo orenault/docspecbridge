@@ -276,10 +276,13 @@ def _blocks_html(blocks: Iterable[dict[str, Any]], *, confluence: bool = False, 
             out.append("<hr/>")
         elif kind == "diagram":
             mermaid = str(block.get("mermaid") or "").strip()
-            if mermaid:
+            fallback = str(block.get("fallback_asset") or "")
+            # Rich targets must remain viewable even when they do not execute Mermaid.
+            # The original source remains in CanonicalDocument and Markdown/RAG.
+            if fallback:
+                out.append(f'<p><img src="{html.escape(_asset_src(fallback, asset_prefix), quote=True)}" alt="Mermaid diagram"/></p>')
+            elif mermaid:
                 out.append("```mermaid\n" + mermaid + "\n```" if confluence else '<pre class="mermaid">' + html.escape(mermaid) + "</pre>")
-            elif block.get("fallback_asset"):
-                out.append(f'<p><img src="{html.escape(_asset_src(str(block.get("fallback_asset")), asset_prefix), quote=True)}" alt="diagram"/></p>')
         elif kind == "child_pages":
             if confluence:
                 # markdown-to-confluence maps this portable marker to Confluence's
